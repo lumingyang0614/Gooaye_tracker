@@ -1,0 +1,59 @@
+app:
+  title: Gooaye Tracker
+  language: zh-TW
+  timezone_offset_hours: 8   # 台灣不採用日光節約時間，用固定 UTC+8 即可
+
+sources:
+  transcripts_pack:
+    # 非官方 AI 聽寫逐字稿站；整包資料無需登入，Access-Control-Allow-Origin: * 為公開資料。
+    manifest_url: https://whatmkreallysaid.com/pack_manifest.json
+    pack_url: https://whatmkreallysaid.com/transcripts.json.br
+    episode_url_template: "https://whatmkreallysaid.com/episode.html?file=EP{n}"
+  feed:
+    # 股癌實際音檔來源（SoundOn RSS），同時也是 Apple Podcasts / Spotify 背後的來源。
+    rss_url: https://feeds.soundon.fm/podcasts/954689a5-3096-43a4-a80b-7810b219cef3.xml
+  vocus:
+    # 付費逐字稿沙龍；只讀取未登入即可見的免費文章（isPay=false），不做付費牆繞過或帳密登入。
+    enabled: false
+    room_url: https://vocus.cc/salon/6908b98efd89780001cb1d32/room/6908c04d5ed52e53fa5821e4
+  whisper:
+    # 用本機 Whisper 補上逐字稿站尚未收錄的最新集數，沿用本機推論、不外送音檔的原則。
+    enabled: true
+    # 一次同步最多用 Whisper 補幾集，避免逐字稿站斷線或大改版時暴增轉譯工作量。
+    gap_episode_limit: 3
+
+sync:
+  # 一次同步最多處理幾個「新增或內容有變」的集數（避免第一次同步就把 693 集全部送進 LLM）。
+  incremental_new_limit: 20
+  analysis_batch_size: 2
+  chunk_max_characters: 11000
+
+analysis:
+  temperature: 0.1
+  max_input_characters: 12000
+
+# 台股公司名稱／代號別名，供把 LLM 抽取出的中文公司名稱還原成證券代號使用。
+# 先以股癌常提及的公司作為種子清單，之後可自行擴充。
+company_aliases:
+  - {symbol: "2330.TW", company_name: 台積電, aliases: [TSMC, 台積電, "2330", "2330.TW"]}
+  - {symbol: "2454.TW", company_name: 聯發科, aliases: [MEDIATEK, 聯發科, "2454", "2454.TW"]}
+  - {symbol: "3661.TW", company_name: 世芯-KY, aliases: [ALCHIP, 世芯, "3661", "3661.TW"]}
+  - {symbol: "3017.TW", company_name: 奇鋐, aliases: [AVC, 奇鋐, "3017", "3017.TW"]}
+  - {symbol: "3665.TW", company_name: 貿聯-KY, aliases: [BIZLINK, 貿聯, "3665", "3665.TW"]}
+  - {symbol: "2382.TW", company_name: 廣達, aliases: [QUANTA, 廣達, "2382", "2382.TW"]}
+  - {symbol: "2317.TW", company_name: 鴻海, aliases: [FOXCONN, HON HAI, 鴻海, "2317", "2317.TW"]}
+  - {symbol: "6669.TW", company_name: 緯穎, aliases: [WIWYNN, 緯穎, "6669", "6669.TW"]}
+  - {symbol: "3443.TW", company_name: 智原, aliases: [FARADAY, 智原, "3443", "3443.TW"]}
+  - {symbol: "6446.TW", company_name: 藥華藥, aliases: [PHARMAESSENTIA, 藥華藥, "6446", "6446.TW"]}
+  - {symbol: "3008.TW", company_name: 大立光, aliases: [LARGAN, 大立光, "3008", "3008.TW"]}
+  - {symbol: "3406.TW", company_name: 玉晶光, aliases: [ASIA OPTICAL, GENIUS, 玉晶光, "3406", "3406.TW"]}
+  # 股癌經常對照的美股／其他市場公司（非台股，但常與台股供應鏈一起討論）。
+  - {symbol: NVDA, company_name: NVIDIA, aliases: [NVIDIA, NVDA]}
+  - {symbol: AMD, company_name: AMD, aliases: [AMD]}
+  - {symbol: AVGO, company_name: Broadcom, aliases: [BROADCOM, 博通, AVGO]}
+  - {symbol: MRVL, company_name: Marvell, aliases: [MARVELL, MRVL]}
+  - {symbol: MU, company_name: Micron, aliases: [MICRON, 美光, MU]}
+  - {symbol: AMZN, company_name: Amazon, aliases: [AMAZON, AMZN]}
+  - {symbol: GOOGL, company_name: Alphabet, aliases: [ALPHABET, GOOGLE, GOOGL]}
+  - {symbol: "005930.KS", company_name: Samsung Electronics, aliases: [SAMSUNG, 三星, "005930"]}
+  - {symbol: "000660.KS", company_name: SK hynix, aliases: [SKHYNIX, "SK HYNIX", "000660"]}

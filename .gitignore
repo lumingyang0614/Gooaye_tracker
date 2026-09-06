@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+logs/
+test_output/
+
+# Leftover from `winget install ffmpeg` accidentally extracting into the repo
+# instead of only WinGet's own Packages dir — ffmpeg is a system dependency,
+# never a project file.
+ffmpeg-*/
+*.7z

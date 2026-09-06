@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gooaye Tracker</title><link rel="stylesheet" href="/static/styles.css?v=1"></head>
+<body>
+<header><div><p class="eyebrow">GOOAYE · TAIWAN MARKET INTELLIGENCE</p><h1>Gooaye <span>Tracker</span></h1></div><div class="status"><i></i><span id="statusText">載入中</span></div></header>
+<nav><button class="active" data-tab="latest">最新集數</button><button data-tab="companies">公司觀點</button><button data-tab="episodes">集數總覽</button></nav>
+<main>
+<section id="latest" class="panel active"><div class="heading"><div><p>LATEST EPISODES</p><h2>最新集數</h2></div><span id="totalEpisodes" class="section-note"></span></div><div id="sentimentSummary" class="sentiment-summary"></div><div id="latestGrid" class="focus-grid"></div></section>
+<section id="companies" class="panel"><div class="heading"><div><p>COMPANY INTELLIGENCE</p><h2>公司觀點</h2></div><span class="section-note">依提及次數排序，點擊原文可查看依據</span></div><div id="companyTable"></div></section>
+<section id="episodes" class="panel"><div class="heading"><div><p>FULL ARCHIVE</p><h2>集數總覽</h2></div><a href="https://whatmkreallysaid.com/" target="_blank" rel="noreferrer">開啟逐字稿站來源 ↗</a></div><p class="section-note">逐字稿來源：whatmkreallysaid.com（非官方）／vocus.cc 免費集數／本機 Whisper 補完。</p><div id="episodesGrid" class="focus-grid"></div><div id="episodesPagination" class="pagination"></div></section>
+</main><footer>資料僅供研究與資訊整理，不構成投資建議；逐字稿為非官方 AI 聽寫或本機語音辨識結果，可能有誤。</footer><script src="/static/app.js?v=1"></script>
+</body></html>
