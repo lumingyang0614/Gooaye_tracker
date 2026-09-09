@@ -9,10 +9,14 @@
    episode that was Whisper-filled, compute a similarity score between the two
    as a lightweight "audio vs. transcript" comparison record.
 4. Split each new/changed episode's transcript into chunks (chunking.py), run
-   them through the local LLM (llm.py), merge the per-chunk results into one
-   episode-level analysis, resolve tickers against the alias list, and persist
-   everything to Postgres.
-5. Roll episode-level tickers up into company_insights.
+   them through the local LLM (llm.py), resolve each chunk's tickers against
+   the alias list, and persist one EpisodeSegment row per chunk (so a stock's
+   segment-specific stance survives even when it differs from the episode's
+   overall mood). Then merge the per-chunk results into one episode-level
+   analysis (majority-vote sentiment, unioned tickers) and persist that too.
+5. Roll segment-level ticker mentions up into company_insights, so each
+   company's stance/thesis is drawn from the segments that actually discuss
+   it rather than from whichever sentiment won the episode's majority vote.
 """
 from __future__ import annotations
 
@@ -23,11 +27,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import Episode
+from app.models import Episode, EpisodeSegment
 from app.runtime_config import load_runtime_config
 from app.services import feed as feed_service
 from app.services import transcripts_pack
@@ -94,6 +99,12 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
         pending_analysis: list[int] = []
 
         with SessionLocal() as session:
+            # Episodes analyzed before EpisodeSegment existed (or before a
+            # sync run that failed partway through inserting segments) have
+            # no segment rows yet; they'd otherwise never get re-queued since
+            # their transcript hasn't changed and analyzed_at is already set.
+            episode_ids_with_segments = set(session.scalars(select(EpisodeSegment.episode_id).distinct()))
+
             for number in all_numbers:
                 pack = pack_by_number.get(number)
                 feed_item = feed_by_number.get(number)
@@ -107,10 +118,20 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
 
                 _apply_metadata(row, pack, feed_item, vocus_item)
                 content_changed = _apply_transcript(row, pack, vocus_item, whisper_text)
+                if content_changed:
+                    # The stored analysis now describes text that is no longer
+                    # here, so it is stale by definition. Clearing the stamp is
+                    # also what makes the episode come back: on any later run
+                    # `content_changed` is already False (the new text was
+                    # saved this run), so a transcript that changed while the
+                    # per-run limit was used up — or while the model was
+                    # offline — would otherwise never be re-analyzed again.
+                    row.analyzed_at = None
 
                 row.updated_at = datetime.now(timezone.utc)
                 stored += int(is_new or content_changed)
-                if (is_new or content_changed or row.analyzed_at is None) and row.transcript_text:
+                needs_segment_backfill = row.analyzed_at is not None and row.id not in episode_ids_with_segments
+                if (is_new or content_changed or row.analyzed_at is None or needs_segment_backfill) and row.transcript_text:
                     pending_analysis.append(number)
             session.commit()
 
@@ -121,14 +142,21 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
                 row = session.scalar(select(Episode).where(Episode.episode_number == number))
                 if row is None or not row.transcript_text:
                     continue
-                symbols = await _analyze_episode(row, sync_cfg)
-                affected_symbols.update(symbols)
-                analyzed += 1
+                previous_analyzed_at = row.analyzed_at
+                symbols = await _analyze_episode(session, row, sync_cfg)
+                # _analyze_episode swallows model failures so one bad episode
+                # can't abort the run; it stamps analyzed_at only on success.
+                # Counting the failures too would report a clean run and hide
+                # them from pending_analysis_backlog, which is the one number
+                # telling the operator that work is still outstanding.
+                if row.analyzed_at is not None and row.analyzed_at != previous_analyzed_at:
+                    affected_symbols.update(symbols)
+                    analyzed += 1
                 session.commit()
 
         insights_result: dict[str, Any] = {"skipped": "no affected symbols"}
         if affected_symbols:
-            insights_result = await rebuild_company_insights(selected_symbols=sorted(affected_symbols))
+            insights_result = await rebuild_company_insights(selected_symbols=sorted(affected_symbols), use_llm=True)
 
         return {
             "pack_episodes": len(pack_episodes),
@@ -162,8 +190,18 @@ def _apply_transcript(row: Episode, pack: dict | None, vocus_item: dict | None, 
     """Pick the best available transcript for this sync pass. Returns True if
     the authoritative transcript_text changed (i.e. re-analysis is needed)."""
     previous_text = row.transcript_text
-    written_text = (pack or {}).get("transcript_text") or (vocus_item or {}).get("transcript_text")
-    written_source = "whatmkreallysaid" if pack else ("vocus_free" if vocus_item else None)
+    # The label has to follow whichever text actually won, not merely which
+    # source dict was present: the pack can list an episode with an empty
+    # transcript while it is still being processed, and storing vocus's text
+    # under the pack's name would make transcript_source lie about provenance.
+    pack_text = str((pack or {}).get("transcript_text") or "")
+    vocus_text = str((vocus_item or {}).get("transcript_text") or "")
+    if pack_text:
+        written_text, written_source = pack_text, "whatmkreallysaid"
+    elif vocus_text:
+        written_text, written_source = vocus_text, "vocus_free"
+    else:
+        written_text, written_source = "", None
 
     if written_text:
         if row.transcript_source == "whisper" and row.whisper_transcript_text:
@@ -184,7 +222,26 @@ def _apply_transcript(row: Episode, pack: dict | None, vocus_item: dict | None, 
     return row.transcript_text != previous_text
 
 
-async def _analyze_episode(row: Episode, sync_cfg: dict[str, Any]) -> set[str]:
+def _canonicalized_segment_rows(analyses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Resolve each chunk's raw ticker strings to canonical symbols, keeping
+    the per-chunk grouping intact (chunk_index == position in the original
+    chunks list) so the caller can persist one EpisodeSegment row per chunk
+    instead of flattening everything into one episode-level union."""
+    rows = []
+    for chunk_index, item in enumerate(analyses):
+        tickers = sorted(canonicalize_symbols({value.upper() for value in item["tickers"]}))
+        rows.append({
+            "chunk_index": chunk_index,
+            "sentiment": item["sentiment"],
+            "importance": item["importance"],
+            "tickers": tickers,
+            "summary": item["summary_zh_tw"],
+            "reason": item["reason"],
+        })
+    return rows
+
+
+async def _analyze_episode(session: Session, row: Episode, sync_cfg: dict[str, Any]) -> set[str]:
     chunk_max = int(sync_cfg.get("chunk_max_characters", 11000))
     chunks = split_transcript(row.transcript_text, max_characters=chunk_max)
     if not chunks:
@@ -195,10 +252,32 @@ async def _analyze_episode(row: Episode, sync_cfg: dict[str, Any]) -> set[str]:
         logger.exception("Gooaye 分析失敗 | episode=%s | error=%s: %s", row.episode_number, type(exc).__name__, exc)
         return set()
 
+    # A symbol dropped entirely on re-analysis (e.g. it was a mis-extracted
+    # one-off) still needs to be handed to rebuild_company_insights so its
+    # now-stale CompanyInsight row gets cleaned up, not just symbols newly
+    # gained this run.
+    previously_affected = {value.strip().upper() for value in row.tickers.split(",") if value.strip()}
+
+    segment_rows = _canonicalized_segment_rows(analyses)
+
+    # Re-analysis (e.g. a Whisper-filled episode later replaced by the
+    # written transcript) must replace this episode's old segments rather
+    # than append duplicates alongside them.
+    session.execute(delete(EpisodeSegment).where(EpisodeSegment.episode_id == row.id))
+    for segment in segment_rows:
+        session.add(EpisodeSegment(
+            episode_id=row.id,
+            chunk_index=segment["chunk_index"],
+            sentiment=segment["sentiment"],
+            importance=segment["importance"],
+            tickers=",".join(segment["tickers"]),
+            summary=segment["summary"],
+            reason=segment["reason"],
+        ))
+
     sentiments = Counter(item["sentiment"] for item in analyses)
     stance = max(("bullish", "bearish", "neutral"), key=lambda key: sentiments[key])
-    tickers = {value.upper() for item in analyses for value in item["tickers"]}
-    tickers = canonicalize_symbols(tickers)
+    tickers = {ticker for segment in segment_rows for ticker in segment["tickers"]}
     sectors = list(dict.fromkeys(value for item in analyses for value in item["sectors"]))
     summaries = [item["summary_zh_tw"] for item in analyses if item["summary_zh_tw"]]
     reasons = [item["reason"] for item in analyses if item["reason"]]
@@ -210,4 +289,4 @@ async def _analyze_episode(row: Episode, sync_cfg: dict[str, Any]) -> set[str]:
     row.summary = "\n\n".join(summaries) or row.summary
     row.analysis_reason = "；".join(reasons) or row.analysis_reason
     row.analyzed_at = datetime.now(timezone.utc)
-    return tickers
+    return previously_affected | tickers

@@ -1,5 +1,5 @@
 from app.models import Episode
-from app.services.sync import _apply_transcript
+from app.services.sync import _apply_transcript, _canonicalized_segment_rows
 from app.services import whisper_transcribe
 
 
@@ -7,6 +7,38 @@ def _episode(**kwargs) -> Episode:
     defaults = dict(episode_number=1, transcript_text="", transcript_source="unknown")
     defaults.update(kwargs)
     return Episode(**defaults)
+
+
+def test_segment_rows_keep_each_chunks_own_sentiment_and_tickers():
+    # One episode, two segments with opposite stances on different stocks —
+    # this is exactly the case the episode-level majority-vote merge used to
+    # lose: a chunk's own sentiment/tickers must survive independently.
+    analyses = [
+        {
+            "summary_zh_tw": "台積電法說優於預期，續看多。",
+            "sentiment": "bullish",
+            "importance": 0.8,
+            "sectors": ["半導體"],
+            "tickers": ["台積電"],
+            "reason": "資本支出上修",
+        },
+        {
+            "summary_zh_tw": "這檔冷門股基本面轉差，看空。",
+            "sentiment": "bearish",
+            "importance": 0.6,
+            "sectors": [],
+            "tickers": ["冷門股"],
+            "reason": "營收連續下滑",
+        },
+    ]
+
+    rows = _canonicalized_segment_rows(analyses)
+
+    assert [row["chunk_index"] for row in rows] == [0, 1]
+    assert rows[0]["sentiment"] == "bullish"
+    assert rows[0]["tickers"] == ["2330.TW"]  # resolved via config/settings.yaml seed alias
+    assert rows[1]["sentiment"] == "bearish"
+    assert rows[1]["tickers"] == ["冷門股"]  # unknown alias passes through uppercased
 
 
 def test_written_transcript_is_stored_when_no_prior_whisper():

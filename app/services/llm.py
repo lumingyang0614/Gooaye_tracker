@@ -266,7 +266,100 @@ async def analyze_chunks(chunks: list[str]) -> list[dict[str, Any]]:
     )
     raw_items = parsed.get("items") or []
     by_index = {int(item["index"]): _normalize_item(item, position) for position, item in enumerate(raw_items) if isinstance(item, dict)}
+    if not by_index:
+        # Nothing usable came back. Padding this out with neutral placeholders
+        # would let the caller stamp the episode as analyzed and move on, so an
+        # outage would quietly turn into a permanent hole in the data. Raising
+        # leaves analyzed_at unset, and the next sync run retries the episode.
+        raise ValueError(f"LLM returned no usable analysis items for {len(chunks)} transcript chunk(s)")
+    # A partial reply is still worth keeping: the chunks the model did answer
+    # for are real analysis, and the gaps are filled with neutral placeholders.
     return [by_index.get(index, _normalize_item({}, index)) for index in range(len(chunks))]
+
+
+COMPANY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "companies": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "thesis": {"type": "string"},
+                    "strengths": {"type": "array", "items": {"type": "string"}},
+                    "weaknesses": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["symbol", "thesis", "strengths", "weaknesses"],
+            },
+        }
+    },
+    "required": ["companies"],
+}
+
+# Deliberately narrower than Serenity Stock Tracker's equivalent schema, which
+# also asks the model for stance/confidence/market. Here stance comes from the
+# per-segment majority vote (company_insights.py) and market from the security
+# master (entity_resolver.resolve_market): both are computed over *every*
+# segment, whereas this call only sees the top handful, and both are
+# reproducible. The model is asked only for the thing it is uniquely good at —
+# turning scattered spoken-word summaries into a readable argument.
+COMPANY_INSTRUCTIONS = """你是台股市場研究資料整理員。以下每個 SYMBOL 區塊列出《股癌》Podcast 中談到該公司的逐字稿片段摘要。
+請逐家公司整理主持人對這家公司的看法：
+- thesis：用繁體中文寫出核心論點，最多 300 字。必須是對這家公司的具體判斷（在意什麼、關鍵變數是什麼），不可只是把片段摘要抄一遍或流水帳。
+- strengths：主持人提到的正面理由，最多 5 點，每點最多 60 字。
+- weaknesses：主持人提到的風險、疑慮或看壞的理由，最多 5 點，每點最多 60 字。
+SEGMENT STANCES 是逐段分析的立場統計，用來理解主持人整體偏向，但理由必須來自片段內容。
+嚴禁虛構財務數字、產品、時間點或未在片段中出現的事實；某一面向沒有依據時就給空陣列，不要硬湊。
+欄位名稱必須完全遵守指定 schema，不要輸出分析過程或 Markdown。"""
+
+
+def _normalize_company(item: dict[str, Any], max_points: int = 5) -> dict[str, Any]:
+    def _points(value: Any) -> list[str]:
+        return [point[:120] for point in _string_list(value)][:max_points]
+
+    return {
+        "symbol": str(item.get("symbol") or "").strip().upper(),
+        "thesis": str(item.get("thesis") or "").strip(),
+        "strengths": _points(item.get("strengths")),
+        "weaknesses": _points(item.get("weaknesses")),
+    }
+
+
+async def analyze_companies(blocks: dict[str, str], *, max_tokens: int = 8192) -> dict[str, dict[str, Any]]:
+    """Write a per-company thesis plus strengths/weaknesses for one batch.
+
+    `blocks` maps canonical symbol -> the evidence text for that company.
+    Returns only the companies the model actually answered for, keyed by
+    symbol; the caller keeps its own segment-derived values for anything
+    missing rather than showing a blank card.
+    """
+    if not blocks:
+        return {}
+    separator = "\n\n---\n\n"
+    prompt = (
+        f"{COMPANY_INSTRUCTIONS}\n\n每個 SYMBOL 都必須回傳一筆結果。\n\n"
+        + separator.join(f"SYMBOL: {symbol}\n{evidence}" for symbol, evidence in blocks.items())
+    )
+    parsed = await chat_json(
+        [
+            {"role": "system", "content": "Return valid JSON matching the schema and one result for every SYMBOL."},
+            {"role": "user", "content": prompt},
+        ],
+        COMPANY_SCHEMA,
+        max_tokens=max_tokens,
+        timeout=max(get_settings().llm_timeout_seconds, 300),
+    )
+    results: dict[str, dict[str, Any]] = {}
+    for raw in parsed.get("companies") or []:
+        if not isinstance(raw, dict):
+            continue
+        item = _normalize_company(raw)
+        # Only accept symbols we actually asked about — a model that invents
+        # or renames a symbol must not create a company row of its own.
+        if item["symbol"] in blocks:
+            results[item["symbol"]] = item
+    return results
 
 
 async def llm_health() -> bool:

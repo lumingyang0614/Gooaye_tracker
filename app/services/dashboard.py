@@ -58,6 +58,11 @@ def _episode_summary(episode: Episode) -> dict:
         "summary": episode.summary,
         "source_url": episode.source_url,
         "transcript_source": episode.transcript_source,
+        # Kept on the summary, not just the detail view: a Whisper-filled
+        # episode is exactly the one a reader needs flagged while skimming the
+        # latest list, since its text came from speech recognition.
+        "comparison_score": episode.comparison_score,
+        "comparison_notes": episode.comparison_notes,
     }
 
 
@@ -69,8 +74,6 @@ def _episode_detail(episode: Episode) -> dict:
         "analysis_reason": episode.analysis_reason,
         "audio_url": episode.audio_url,
         "vocus_url": episode.vocus_url,
-        "comparison_score": episode.comparison_score,
-        "comparison_notes": episode.comparison_notes,
         "transcript_text": episode.transcript_text,
         "transcript_length": len(episode.transcript_text or ""),
         "analyzed_at": episode.analyzed_at.isoformat() if episode.analyzed_at else None,

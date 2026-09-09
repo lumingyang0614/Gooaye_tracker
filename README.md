@@ -81,14 +81,17 @@ Copy-Item .env.example .env
 - `LLM_PROVIDER=bai` 時，用 `BAI_API_URL`／`BAI_API_KEY`／`BAI_API_MODEL` 呼叫雲端服務；若已經在跑 Serenity Stock Tracker，可以沿用同一組 BAI 金鑰（兩個專案各自獨立呼叫，不共用程式或資料庫，只是共用同一組帳號額度）。BAI／GLM 系列模型對嚴格 JSON schema 的支援不穩定，此路徑改用「先照 prompt 要求輸出 JSON、格式不對就重試一次」的方式，而不強制 `response_format`。
 - 若改用 `LLM_PROVIDER=api`，需另外填 `LLM_API_URL`／`LLM_API_KEY`／`LLM_API_MODEL`（任何其他相容 OpenAI Chat Completions 格式的服務，會強制要求 JSON schema）。
 
-非機密設定（來源網址、Whisper 開關、台股別名清單）在 `config/settings.yaml`，可直接編輯，不需要改程式碼。
+非機密設定（來源網址、Whisper 開關、台股別名清單、公司論點分析開關）在 `config/settings.yaml`，可直接編輯，不需要改程式碼。
 
 ## 初始化資料庫與首次同步
 
 ```powershell
 python -m scripts.init_db
+python -m scripts.sync_taiwan_securities
 python -m scripts.sync_gooaye
 ```
+
+`sync_taiwan_securities` 會從 TWSE 與 TPEx 官方 OpenAPI 抓上市／上櫃證券主檔（免金鑰）。有了這張表，股癌講到文曄、京元電這類不在種子清單裡的公司才有辦法還原成證券代號，而不是以原始中文字串存進資料庫。之後想更新掛牌清單時再跑一次即可。
 
 首次同步預設只分析最新 20 集（`config/settings.yaml` 的 `sync.incremental_new_limit`），避免第一次就把近 700 集全部送進 LLM。若要把全部歷史集數都跑過分析（會呼叫 LLM 數百次，耗時較久）：
 
@@ -96,13 +99,58 @@ python -m scripts.sync_gooaye
 python -m scripts.backfill_transcripts
 ```
 
+### 重建公司觀點
+
+改了 `config/settings.yaml` 的別名清單、或剛更新完台股證券主檔之後，不需要重跑逐字稿分析，只要重建公司觀點：
+
+```powershell
+python -m scripts.rebuild_company_insights
+```
+
+這會依 `analysis.company_analysis_batch_size` 分批呼叫 LLM，替每家公司寫出核心論點與優劣勢。只想更新機械彙整（立場、重要度、市場分類、提及次數、原文連結）而完全不呼叫模型時：
+
+```powershell
+python -m scripts.rebuild_company_insights --no-llm
+python -m scripts.rebuild_company_insights --symbols 2330.TW NVDA
+```
+
+### 從舊版本升級
+
+`init_db()` 只會建立不存在的資料表，不會替既有資料表補欄位。若資料庫是在 `company_insights.market` 這個欄位出現之前建立的，先跑一次遷移（可重複執行）：
+
+```powershell
+python -m scripts.migrate_company_market
+```
+
+這支腳本刻意只做兩件事：新增欄位、逐列填入 `market`。它**不會**動到 thesis、優劣勢、立場或提及次數，也不會刪任何公司 — 在分段資料表出現之前建立的資料庫，每一家公司都沒有對應的分段，若讓它跑完整 rebuild 就會被整批清掉。
+
+想重新產生論點與優劣勢時，另外執行負責這件事的指令：
+
+```powershell
+python -m scripts.rebuild_company_insights
+```
+
+### 讓舊資料的代號跟上主檔
+
+在同步台股證券主檔（或新增別名）之前分析過的集數，資料庫裡存的是模型當時給的字串，例如「文曄」而不是 `3036.TW`。公司觀點頁在讀取時就會歸併，所以那一頁不受影響；但集數卡上的代號標籤仍會顯示舊字串。要讓兩邊一致：
+
+```powershell
+python -m scripts.backfill_segment_tickers --dry-run
+python -m scripts.backfill_segment_tickers
+```
+
+先用 `--dry-run` 看會改幾筆。這支腳本只做查表改寫，不呼叫模型，可重複執行。
+
 ## 執行網頁 Dashboard
 
 ```powershell
 uvicorn app.main:app --reload --port 8100
 ```
 
-開啟 http://localhost:8100 ，畫面分「最新集數」「公司觀點」「集數總覽」三個分頁；「集數總覽」可展開每集完整逐字稿，並在有 Whisper 比對紀錄時顯示相似度說明。
+開啟 http://localhost:8100 ，畫面分「最新集數」「公司觀點」「集數總覽」三個分頁。
+
+- 「公司觀點」可依台股／美股／其他市場／待確認篩選（篩選鈕上的數字是各分類的公司數），每家公司顯示核心論點與優勢／劣勢兩欄，並可展開「分段」看逐段依據。列上的「重要度」是提及該公司的片段平均重要度，**不是**對立場的把握程度。
+- 「集數總覽」可展開每集完整逐字稿，並在有 Whisper 比對紀錄時顯示相似度說明。
 
 之後要抓新集數，重新執行：
 
@@ -118,11 +166,20 @@ python -m scripts.sync_gooaye
 python -m pytest
 ```
 
-測試只涵蓋不需要網路／資料庫的純函式邏輯：逐字稿切段（`chunking.py`）、Whisper 與正式逐字稿的取捨與比對分數（`sync.py` 的 `_apply_transcript`）、公司別名還原（`entity_resolver.py`）。
+測試不需要網路、不需要 PostgreSQL，也不會呼叫任何 LLM（模型呼叫一律以 stub 取代），涵蓋：逐字稿切段（`chunking.py`）、Whisper 與正式逐字稿的取捨與比對分數（`sync.py` 的 `_apply_transcript`）、公司別名還原與市場判定（`entity_resolver.py`）、TWSE／TPEx 主檔解析與別名歧義處理（`taiwan_securities.py`）、公司論點分析與其失敗退回機制（`company_insights.py`）。
+
+收集範圍與暫存目錄設定在 `pytest.ini`：只收 `tests/`（根目錄的 `test_output/` 是歷次 QA 產出的檔案，一起收集會在匯入階段就中斷整輪測試），並把 `tmp_path` 指向專案內的 `.pytest_tmp/`。後者是為了繞過系統暫存區裡權限已經壞掉、非管理員無法讀取或刪除的 `pytest-of-<使用者>` 目錄；若之後用系統管理員身分把該目錄刪掉，就可以移除 `pytest.ini` 裡的 `--basetemp` 設定。
 
 ## 已知範圍限制
 
-- **vocus.cc**：只讀取沙龍首頁第一頁列出的免費文章，不翻頁、不登入、不繞過付費牆。付費集數完全不處理。
+- **vocus.cc**：只讀取沙龍首頁第一頁列出的免費文章，不翻頁、不登入、不繞過付費牆。只有頁面資料明確標示 `isPay=false` 的文章會被採用；標示為付費、值為 null 或根本沒有這個欄位時一律跳過 — 無法確認是免費的就當作付費處理。
 - **Whisper 比對**：只用來補「逐字稿站還沒收錄的最新 1～3 集」空窗，**不會**對已有逐字稿的數百集歷史全部重跑語音辨識做比對（下載＋轉譯全部歷史音檔耗時耗空間，效益也低）。
-- **台股代號還原**：目前用 `config/settings.yaml` 裡手動維護的公司別名種子清單（`company_aliases`），不是完整的 TWSE／TPEx 證券主檔。之後若要更準，可以比照 Serenity Stock Tracker 的做法，另外寫一個同步 TWSE／TPEx OpenAPI 的模組來源。
-- **公司觀點的 thesis**：目前是直接取最重要的幾集摘要拼接，不像 Serenity Stock Tracker 那樣另外呼叫一次 LLM 生成客製化優劣勢；效果比較陽春但省一次 LLM 呼叫。
+- **分析失敗會自動重試**：模型呼叫失敗、或回傳內容完全無法使用時，該集不會被標記為已分析，也不會計入 `episodes_analyzed`，而是留在 `pending_analysis_backlog` 等下一次同步重跑。逐字稿內容變動（例如 Whisper 版本被正式逐字稿取代）同樣會讓該集重新排入分析佇列，即使變動當下因為每輪上限而沒輪到它。
+- **台股代號還原**：依序查三層 — `config/settings.yaml` 的手動種子清單（俗稱、英文簡稱、非台股公司）、TWSE／TPEx 官方證券主檔、選用的 `XSTOCKTRACKER_DB_URL` 多市場主檔。台股主檔排在多市場主檔之前，因為股癌是台灣節目，四位數字代號絕大多數是台灣掛牌，而多市場主檔會把台／日共用的四位數代號當成歧義直接丟掉。跑 `scripts.sync_taiwan_securities` 之前，只有種子清單生效。公司分組是在**讀取時**重新解析代號的，所以補完主檔或改完別名後只要重建公司觀點就會生效，不需要先改資料。
+
+- **舊名稱的公司列會自動併掉**：主檔補上「文曄」對應之後，同一家公司會先出現兩列（舊的「文曄」與新的 `3036.TW`）。不論是完整重建，或是同步時只針對受影響公司的局部重建，都會把解析後指向同一家公司的舊列刪除、併成一列。局部重建只處理這次範圍內的公司，範圍外那些沒有分段的舊列不會被順手刪掉 — 那是完整重建的職責。
+- **主檔同步是全有全無**：`sync_taiwan_securities` 會先把整張表標記為停用再寫回當次結果，因此上市與上櫃兩個來源會各自檢查；只要任何一邊沒有回傳有效資料就整批中止並保留舊主檔。半套的主檔會讓某個交易所的公司全部無法解析，而且表面上看起來是成功的。
+- **公司名稱**：先用 TWSE／TPEx 主檔的公司簡稱，再讓 `config/settings.yaml` 的種子清單覆寫。主檔還沒同步、種子清單也沒有的公司會直接顯示代號。
+- **市場分類**：由代號直接判定（`.TW`→台股、其他市場後綴→其他市場、純英文字母 1–5 碼→美股），**不交給 LLM 猜**；判不出來的一律留在「待確認」等人工複核，而不是硬塞進某個市場。需要覆寫時在 `config/settings.yaml` 的別名項目加上 `market:`。
+- **立場與論點的分工**：立場（多／空／中立）由逐段分析的多數決決定，看的是該公司的**每一個**片段；論點與優劣勢才交給 LLM，且只看重要度最高的幾段（`analysis.company_analysis_segment_limit`）。因此 LLM 失敗或以 `--no-llm` 跳過時，卡片會退回成逐段摘要拼接、優劣勢留空，而不是變成空白。畫面上的「目前沒有可列出的優勢或劣勢」是中性描述：模型本來就被要求「沒有依據就回空陣列」，所以空白不代表分析失敗。分析到底有沒有跑完，看同步或重建指令回報的 `narratives_completed` / `narratives_attempted`。
+- **重要度不等於信心**：`company_insights.confidence` 存的是片段平均重要度。真正的「立場一致度」（例如 9 段看多 1 段看空 vs 5:5）需要另外開欄位，目前尚未實作。

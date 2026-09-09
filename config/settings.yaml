@@ -31,9 +31,24 @@ sync:
 analysis:
   temperature: 0.1
   max_input_characters: 12000
+  # 公司級論點分析：在逐段彙整之外，另外呼叫一次 LLM 產生每家公司的核心論點與優劣勢。
+  # 關掉的話公司觀點仍可用，但「主要觀點」會退回成逐段摘要拼接、優劣勢為空。
+  company_analysis_enabled: true
+  # 一次送幾家公司給模型。調大可減少往返次數，但單次 prompt 會變長。
+  company_analysis_batch_size: 2
+  # 每家公司最多取幾個（重要度最高的）片段作為依據。
+  company_analysis_segment_limit: 8
+  # 每個片段摘要送進 prompt 前截斷的字數。
+  company_analysis_segment_characters: 600
+  company_analysis_max_tokens: 8192
 
 # 台股公司名稱／代號別名，供把 LLM 抽取出的中文公司名稱還原成證券代號使用。
-# 先以股癌常提及的公司作為種子清單，之後可自行擴充。
+# 這份是「手動維護的種子清單」，優先權高於 TWSE／TPEx 證券主檔
+# （`python -m scripts.sync_taiwan_securities`），用來補上主檔沒有的俗稱、
+# 英文簡稱與非台股公司。
+# 每筆可另外指定 market（TW／US／OTHER／UNKNOWN）；未指定時由代號自動判斷
+# （.TW→TW、其他市場後綴→OTHER、純英文字母 1-5 碼→US），只有在代號會誤導時
+# 才需要手動指定，例如台積電 ADR「TSM」在美國掛牌，應標成 US。
 company_aliases:
   - {symbol: "2330.TW", company_name: 台積電, aliases: [TSMC, 台積電, "2330", "2330.TW"]}
   - {symbol: "2454.TW", company_name: 聯發科, aliases: [MEDIATEK, 聯發科, "2454", "2454.TW"]}

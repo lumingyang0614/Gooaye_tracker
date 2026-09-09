@@ -7,8 +7,9 @@ it only reads what an anonymous visitor's browser already receives.
 Each article page is a Next.js app that embeds the full article record (title,
 publish date, HTML body, and an `isPay` flag) in a `<script id="__NEXT_DATA__">`
 JSON blob, verified by manually fetching a real article page while designing
-this project. When `isPay` is true we skip the article entirely — its `content`
-field for a paid article is not something this code inspects or attempts to use.
+this project. An article is used only when `isPay` is explicitly false; a true,
+null or absent flag means the article is skipped entirely — its `content` field
+is not something this code inspects or attempts to use in that case.
 
 Used only as an optional cross-check against the whatmkreallysaid.com pack
 (see sync.py); disabled by default via config/settings.yaml sources.vocus.enabled.
@@ -77,8 +78,14 @@ def _parse_article(page_html: str, url: str) -> dict[str, Any] | None:
         article = data["props"]["pageProps"]["parsedArticle"]
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
-    if article.get("isPay"):
-        return None  # paid article — not read, not stored, not used.
+    # Only an explicit isPay=False means "this article is free to read". A
+    # missing or null flag means the page did not tell us, and an unconfirmed
+    # article must be treated as paid — the safe default for a module whose
+    # whole premise is never touching paywalled content. Guessing from the
+    # presence of a `content` field would be exactly the wrong call, since a
+    # truncated preview also carries one.
+    if article.get("isPay") is not False:
+        return None  # paid or unconfirmed — not read, not stored, not used.
 
     title = str(article.get("title") or "").strip()
     episode_match = _EPISODE_NUMBER_RE.search(title)
