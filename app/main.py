@@ -7,11 +7,13 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.db import init_db, postgres_health
+from app.services.background_updates import background_updates
 from app.services.company_insights import list_symbol_segments, rebuild_company_insights
 from app.services.dashboard import build_dashboard, episodes_page
 from app.services.llm import llm_health
 from app.services.sync import sync_gooaye
 from app.services.taiwan_securities import sync_taiwan_securities
+from app.services.xstock_push import is_enabled as xstock_push_enabled, push_company_insights
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend"
@@ -21,7 +23,9 @@ FRONTEND = ROOT / "frontend"
 async def lifespan(_: FastAPI):
     if postgres_health():
         init_db()
+    background_updates.start()
     yield
+    await background_updates.stop()
 
 
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan)
@@ -90,6 +94,34 @@ async def sync_tw_securities():
         raise HTTPException(503, f"TWSE/TPEx sync failed: {exc}") from exc
 
 
+@app.post("/api/xstocktracker/push")
+def push_to_xstocktracker(symbols: str | None = None):
+    """把 Gooaye 的公司觀點寫進 X Stock Tracker 的 x_company_views（source='gooaye'）。
+
+    不帶 symbols 就是全量推送：Gooaye 目前有的公司全部寫入，並刪掉那邊已經不該
+    存在的 source='gooaye' 列。平常同步流程會自動增量推送，這個端點是給改完設定
+    或推送曾經失敗時手動補跑用的。
+    """
+    if not postgres_health():
+        raise HTTPException(503, "PostgreSQL unavailable")
+    selected = [value.strip() for value in symbols.split(",") if value.strip()] if symbols else None
+    if symbols is not None and not selected:
+        raise HTTPException(400, "symbols must contain at least one symbol")
+    return push_company_insights(selected_symbols=selected)
+
+
+@app.get("/api/schedules/status")
+def schedule_status():
+    return background_updates.status
+
+
+@app.post("/api/schedules/episodes/run-now")
+async def schedule_episodes_now():
+    if not postgres_health():
+        raise HTTPException(503, "PostgreSQL unavailable")
+    return await background_updates.run_episodes_now()
+
+
 @app.get("/api/health")
 async def health():
     return {
@@ -97,4 +129,6 @@ async def health():
         "postgres": postgres_health(),
         "llm": await llm_health(),
         "llm_provider": get_settings().llm_provider,
+        "xstocktracker_push": xstock_push_enabled(),
+        "automatic_updates": background_updates.status,
     }

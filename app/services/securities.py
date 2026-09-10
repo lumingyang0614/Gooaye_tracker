@@ -33,7 +33,14 @@ def _psycopg_dsn(dsn: str) -> str:
 
 
 @lru_cache
-def _engine():
+def xstocktracker_engine():
+    """The shared engine for the X Stock Tracker database, or None if
+    XSTOCKTRACKER_DB_URL isn't set.
+
+    Cached so the security-master lookups here and the company-view push in
+    app/services/xstock_push.py use one connection pool between them rather
+    than opening a second one against the same database.
+    """
     url = get_settings().xstocktracker_db_url.strip()
     if not url:
         return None
@@ -54,7 +61,7 @@ def load_security_lookup() -> dict[str, dict[str, str]]:
     two markets). Any alias that resolves to more than one distinct symbol is
     dropped rather than guessed at.
     """
-    engine = _engine()
+    engine = xstocktracker_engine()
     if engine is None:
         return {}
     canonical_entries: dict[str, dict[str, str]] = {}

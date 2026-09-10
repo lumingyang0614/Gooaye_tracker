@@ -25,8 +25,9 @@
 | PostgreSQL | 集數逐字稿與公司觀點（獨立新資料庫，不與 Serenity Stock Tracker 共用） |
 | Ollama（預設）或相容 OpenAI API | LLM 分析逐字稿片段，抽取公司提及與立場 |
 | faster-whisper + ffmpeg | 本機語音轉文字（僅用於補逐字稿站的最新集數空窗） |
+| 背景排程 | 定期同步新集數與證券主檔（`app/services/background_updates.py`） |
 
-資料流程：`whatmkreallysaid.com 整包 / vocus.cc 免費集數 / SoundOn RSS + 本機 Whisper` → `episodes` 資料表 → 逐字稿切段（市場分析／Q&A）→ LLM 分析 → `episodes.tickers` → 彙整成 `company_insights` → Dashboard。
+資料流程：`whatmkreallysaid.com 整包 / vocus.cc 免費集數 / SoundOn RSS + 本機 Whisper` → `episodes` 資料表 → 逐字稿切段（市場分析／Q&A）→ LLM 分析 → `episodes.tickers` → 彙整成 `company_insights` → Dashboard，並同步推送到 [X Stock Tracker 的 `x_company_views`](#與-x-stock-tracker-的整合)。
 
 ## 安裝
 
@@ -158,7 +159,64 @@ uvicorn app.main:app --reload --port 8100
 python -m scripts.sync_gooaye
 ```
 
-（可以自行用 Windows工作排程器排定週期執行；本專案本身不像 Serenity Stock Tracker 那樣內建常駐排程器。）
+## 背景排程
+
+Dashboard 啟動後會自動跑兩個背景工作，不必自己排 Windows 工作排程器，也不必手動打 `POST /api/sync`：
+
+| 工作 | 預設週期 | 做的事 |
+| --- | --- | --- |
+| `episode_sync` | 6 小時 | 跑一次完整同步（抓逐字稿站／RSS → 分析新集數 → 更新公司觀點 → 推送到 X Stock Tracker） |
+| `taiwan_securities` | 24 小時 | 更新 TWSE／TPEx 證券主檔，然後**不呼叫 LLM**重建一次公司觀點，把先前存成「文曄」的提及歸戶成 `3036.TW` |
+
+週期與開關都在 `config/settings.yaml` 的 `schedules`；`schedules.enabled: false` 就完全回到手動模式。`episode_sync_hours` 有 1 小時的下限——逐字稿站與 RSS 都是別人的網站，設定打錯不該變成連續下載迴圈。
+
+相關 API：
+
+```
+GET  /api/schedules/status          # 兩個工作的狀態、上次結果、下次執行時間
+POST /api/schedules/episodes/run-now  # 立刻跑一次（已在執行中會回 already_running，不會重複跑）
+```
+
+## 與 X Stock Tracker 的整合
+
+X Stock Tracker（`E:\X_stock_tracker`）從 Alva @zet 的 X 貼文彙整公司觀點，Gooaye 從股癌逐字稿彙整公司觀點——同樣的問題、不同的證據。設定好之後，**Gooaye 每次更新公司觀點，就會把同一批公司寫進 X Stock Tracker 的 `x_company_views`**，那邊的「公司觀點」分頁就能把兩種看法並排比較。
+
+兩邊的資料是**並存而不是合併**的：`x_company_views` 有一個 `source` 欄位（`x` ／ `gooaye`），唯一鍵是 `(source, symbol)`，所以 `2330.TW` 兩邊各一列，各自保有自己的立場、論點與出處連結。這個欄位同時也是互相保護的機制：
+
+- X Stock Tracker 全量重建時只刪 `source='x'` 的列，碰不到 Gooaye 的資料。
+- 本專案（`app/services/xstock_push.py`）只寫、只刪 `source='gooaye'` 的列，碰不到 X 的資料。
+- 資料庫帳號只被授權讀寫 `x_company_views` 這一張表；`x_articles`（X Stock Tracker 的原始貼文）依然完全沒有權限。
+
+### 設定步驟
+
+1. 在 `.env` 設定 `XSTOCKTRACKER_DB_URL` 指向 X Stock Tracker 的資料庫。
+2. 到 `E:\X_stock_tracker` 執行一次遷移，它會加上 `source` 欄位、把唯一鍵換成 `(source, symbol)`，並授權本專案的資料庫角色寫入 `x_company_views`：
+
+   ```powershell
+   python -m scripts.migrate_company_view_source
+   # 角色名稱不是 gooaye 時：--writer-role 你的角色
+   # DSN 不是 owner／superuser 時：--no-grant，再請 DBA 執行它印出來的 GRANT
+   ```
+
+3. 回到 `F:\Gooaye` 做一次全量推送（之後同步流程會自動增量推送）：
+
+   ```powershell
+   python -m scripts.push_to_xstocktracker
+   python -m scripts.push_to_xstocktracker --symbols 2330.TW NVDA   # 只推特定幾家
+   ```
+
+推送寫進去的欄位對應：`thesis` 會加上 `［股癌 Gooaye · <市場> · 提及 N 集］` 開頭（X 的卡片跟自家 X 貼文列並排顯示，沒有這行會看起來像某則推文說的；`x_company_views` 也沒有 market 欄位，順便把 Gooaye 判定好的市場帶過去），`mention_count` 是提及的集數，`evidence_urls` 是逐字稿站的集數連結。
+
+不想推送時，把 `config/settings.yaml` 的 `xstocktracker.push_company_insights` 設成 `false`——證券主檔的唯讀查詢仍然照常運作。沒設定 `XSTOCKTRACKER_DB_URL` 也會自動略過。
+
+**推送永遠不會讓同步失敗。** 對方資料庫連不上、還沒遷移、或權限不足時，只會在結果裡回一個 `error` 並寫進 log；Gooaye 自己的集數與公司觀點早就已經寫進自己的資料庫了。下一次背景排程若發現沒有新集數，會自動改跑一次全量推送，把先前失敗的更新補上。
+
+也可以手動觸發：
+
+```
+POST /api/xstocktracker/push                  # 全量推送（並清掉已失效的 gooaye 列）
+POST /api/xstocktracker/push?symbols=2330.TW  # 只推特定幾家
+```
 
 ## 測試
 
@@ -166,7 +224,9 @@ python -m scripts.sync_gooaye
 python -m pytest
 ```
 
-測試不需要網路、不需要 PostgreSQL，也不會呼叫任何 LLM（模型呼叫一律以 stub 取代），涵蓋：逐字稿切段（`chunking.py`）、Whisper 與正式逐字稿的取捨與比對分數（`sync.py` 的 `_apply_transcript`）、公司別名還原與市場判定（`entity_resolver.py`）、TWSE／TPEx 主檔解析與別名歧義處理（`taiwan_securities.py`）、公司論點分析與其失敗退回機制（`company_insights.py`）。
+測試不需要網路、不需要 PostgreSQL，也不會呼叫任何 LLM（模型呼叫一律以 stub 取代），涵蓋：逐字稿切段（`chunking.py`）、Whisper 與正式逐字稿的取捨與比對分數（`sync.py` 的 `_apply_transcript`）、公司別名還原與市場判定（`entity_resolver.py`）、TWSE／TPEx 主檔解析與別名歧義處理（`taiwan_securities.py`）、公司論點分析與其失敗退回機制（`company_insights.py`）、推送到 X Stock Tracker 的來源隔離與失敗容錯（`xstock_push.py`）、背景排程的間隔下限與重複執行防護（`background_updates.py`）。
+
+`tests/test_xstock_push_live.py` 是唯一會碰到真實資料庫的檔案：它只在 `XSTOCKTRACKER_DB_URL` 有設定且連得上時才執行，全部包在最後一定會 rollback 的交易裡（不會留下任何資料），用來驗證那些純單元測試看不到的東西——授權是否真的到位、`(source, symbol)` 唯一鍵是否真的允許同一檔股票兩邊各一列、以及 `x_articles` 是否仍然沒有權限。沒設定就整個跳過。
 
 收集範圍與暫存目錄設定在 `pytest.ini`：只收 `tests/`（根目錄的 `test_output/` 是歷次 QA 產出的檔案，一起收集會在匯入階段就中斷整輪測試），並把 `tmp_path` 指向專案內的 `.pytest_tmp/`。後者是為了繞過系統暫存區裡權限已經壞掉、非管理員無法讀取或刪除的 `pytest-of-<使用者>` 目錄；若之後用系統管理員身分把該目錄刪掉，就可以移除 `pytest.ini` 裡的 `--basetemp` 設定。
 

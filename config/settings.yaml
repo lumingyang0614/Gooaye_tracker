@@ -42,6 +42,32 @@ analysis:
   company_analysis_segment_characters: 600
   company_analysis_max_tokens: 8192
 
+# 與 X Stock Tracker（E:\X_stock_tracker）的整合。
+# 開啟後，每次公司觀點更新完，就把 Gooaye 這邊算出來的公司列以 source='gooaye'
+# 寫進 X Stock Tracker 的 x_company_views 資料表，讓那邊的儀表板可以把「股癌的
+# 看法」跟「X 貼文的看法」並排比較。連線位址讀 .env 的 XSTOCKTRACKER_DB_URL；
+# 沒設定就自動略過，不會讓同步失敗。
+# 前置作業（在 E:\X_stock_tracker 執行一次）：
+#   python -m scripts.migrate_company_view_source
+# 它會加上 source 欄位、把唯一鍵改成 (source, symbol)，並授權本專案的資料庫角色
+# 寫入 x_company_views（其餘資料表維持唯讀／無權限）。
+xstocktracker:
+  push_company_insights: true
+
+schedules:
+  # 背景排程：不用手動打 API，服務啟動後就定期同步新集數並更新公司觀點。
+  # 關掉的話一切照舊，只是要自己呼叫 POST /api/sync。
+  enabled: true
+  episode_sync_enabled: true
+  taiwan_security_sync_enabled: true
+  # 服務啟動後等幾秒才跑第一次（讓 FastAPI 先完成啟動）。
+  startup_delay_seconds: 10
+  # 股癌大約每週更新兩集，逐字稿站還會落後 1～3 集，每 6 小時檢查一次就很足夠。
+  episode_sync_hours: 6
+  # 每次背景同步最多分析幾集；留空則用 sync.incremental_new_limit。
+  episode_sync_limit: 5
+  taiwan_security_sync_hours: 24
+
 # 台股公司名稱／代號別名，供把 LLM 抽取出的中文公司名稱還原成證券代號使用。
 # 這份是「手動維護的種子清單」，優先權高於 TWSE／TPEx 證券主檔
 # （`python -m scripts.sync_taiwan_securities`），用來補上主檔沒有的俗稱、

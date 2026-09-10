@@ -17,6 +17,10 @@
 5. Roll segment-level ticker mentions up into company_insights, so each
    company's stance/thesis is drawn from the segments that actually discuss
    it rather than from whichever sentiment won the episode's majority vote.
+6. Push those same companies into X Stock Tracker's x_company_views under
+   source='gooaye' (app/services/xstock_push.py), so both projects' views of
+   a company sit side by side on that project's dashboard. Optional and
+   non-fatal: it is skipped when unconfigured and never fails the sync run.
 """
 from __future__ import annotations
 
@@ -42,6 +46,7 @@ from app.services.chunking import split_transcript
 from app.services.company_insights import rebuild_company_insights
 from app.services.entity_resolver import canonicalize_symbols
 from app.services.llm import analyze_chunks
+from app.services.xstock_push import push_company_insights
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -155,8 +160,14 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
                 session.commit()
 
         insights_result: dict[str, Any] = {"skipped": "no affected symbols"}
+        # Mirror the same companies into X Stock Tracker's x_company_views so
+        # its dashboard shows the 股癌 view next to its own X-post view. Run
+        # only after the local rebuild has committed, and never allowed to
+        # fail the run — see app/services/xstock_push.py.
+        xstock_result: dict[str, Any] = {"skipped": "no affected symbols"}
         if affected_symbols:
             insights_result = await rebuild_company_insights(selected_symbols=sorted(affected_symbols), use_llm=True)
+            xstock_result = push_company_insights(selected_symbols=sorted(affected_symbols))
 
         return {
             "pack_episodes": len(pack_episodes),
@@ -168,6 +179,7 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
             "pending_analysis_backlog": max(0, len(pending_analysis) - analyzed),
             "affected_symbols": sorted(affected_symbols),
             "company_insights": insights_result,
+            "xstocktracker_push": xstock_result,
         }
 
 
