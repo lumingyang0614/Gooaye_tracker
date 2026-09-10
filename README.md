@@ -115,6 +115,27 @@ python -m scripts.rebuild_company_insights --no-llm
 python -m scripts.rebuild_company_insights --symbols 2330.TW NVDA
 ```
 
+### 遇到 429 Too Many Requests
+
+同步流程有兩個地方會連續打 LLM，兩個都會踩到雲端 provider（BAI／GLM 等）的流量限制：
+
+- **每集分析**：一集就是一次大請求，`incremental_new_limit: 20` 就是最多 20 次連發。被擋掉的集數 `analyzed_at` 不會蓋章，會留在 `pending_analysis_backlog` 裡等下次。
+- **公司論點分析**：`company_analysis_batch_size: 2` 時，17 家公司就是 9 批連發。被擋掉的那幾批只剩逐段彙整的退回文字，`narrative_failures` 會列出來。
+
+兩層防護：先用間隔降低觸發機率（`app/services/llm.py` 的 `paced`，兩個迴圈共用），真的被擋了再重試（`_post_with_retries`）。設定分別在 `config/settings.yaml` 的 `sync` 與 `analysis`：
+
+| 設定 | 預設 | 作用 |
+| --- | --- | --- |
+| `sync.episode_analysis_pause_seconds` | `2.0` | 每集分析之間等幾秒 |
+| `analysis.company_analysis_pause_seconds` | `2.0` | 每批公司之間等幾秒 |
+| `analysis.rate_limit_max_retries` | `4` | 收到 429／5xx 時重試幾次（`0` = 關掉重試） |
+| `analysis.rate_limit_backoff_seconds` | `5.0` | 沒有 `Retry-After` 標頭時的起始退避秒數，之後指數成長並加隨機抖動 |
+| `analysis.rate_limit_max_backoff_seconds` | `60.0` | 單次等待上限，避免一個離譜的 `Retry-After` 卡住整輪 |
+
+供應商有回 `Retry-After` 標頭時一律以標頭為準（秒數或 HTTP 日期都支援）——那是對方明確告知何時會再接受流量，自己猜一個更短的退避只是再浪費一次請求。400／401／403 這類錯誤不會重試，因為重試只會得到同樣的結果，反而延後你看到真正的問題。
+
+還是一直被限流的話，把兩個 `*_pause_seconds` 都調大（例如 `5.0`），或把 `company_analysis_batch_size` 調大以減少往返次數（但單次 prompt 會變長）。免費額度本來就很緊的話，`sync.incremental_new_limit` 調小、分多次跑會比一次塞滿更容易跑完。
+
 ### 從舊版本升級
 
 `init_db()` 只會建立不存在的資料表，不會替既有資料表補欄位。若資料庫是在 `company_insights.market` 這個欄位出現之前建立的，先跑一次遷移（可重複執行）：

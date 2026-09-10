@@ -45,7 +45,7 @@ from app.services import whisper_transcribe
 from app.services.chunking import split_transcript
 from app.services.company_insights import rebuild_company_insights
 from app.services.entity_resolver import canonicalize_symbols
-from app.services.llm import analyze_chunks
+from app.services.llm import analyze_chunks, paced
 from app.services.xstock_push import push_company_insights
 
 logger = logging.getLogger("uvicorn.error")
@@ -141,8 +141,14 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
             session.commit()
 
         # Analyze the newest pending episodes first, capped per run.
+        # Paced: each episode is one large model request, and a run allowed to
+        # fire 20 of them back to back is what earns a 429 partway through —
+        # after which every remaining episode fails too and the whole backlog
+        # is still outstanding. llm.py retries an individual rejection; this
+        # keeps the run from provoking one.
         pending_analysis.sort(reverse=True)
-        for number in pending_analysis[:max(0, analysis_limit)]:
+        episode_pause = max(0.0, float(sync_cfg.get("episode_analysis_pause_seconds", 2.0)))
+        async for number in paced(pending_analysis[:max(0, analysis_limit)], episode_pause):
             with SessionLocal() as session:
                 row = session.scalar(select(Episode).where(Episode.episode_number == number))
                 if row is None or not row.transcript_text:

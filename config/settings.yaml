@@ -27,6 +27,9 @@ sync:
   incremental_new_limit: 20
   analysis_batch_size: 2
   chunk_max_characters: 11000
+  # 每集分析之間的間隔秒數。一集就是一次大請求，連續打 20 集很容易在中途被
+  # provider 回 429，之後剩下的集數也會跟著全失敗。設 0 可關閉。
+  episode_analysis_pause_seconds: 2.0
 
 analysis:
   temperature: 0.1
@@ -41,6 +44,16 @@ analysis:
   # 每個片段摘要送進 prompt 前截斷的字數。
   company_analysis_segment_characters: 600
   company_analysis_max_tokens: 8192
+  # 每批公司之間的間隔秒數。公司論點分析是整個專案打 LLM 最密集的地方
+  # （17 家公司 = 9 批連續請求），雲端 provider 會回 429 Too Many Requests，
+  # 一旦被擋，那一批就只剩逐段彙整的退回文字。調大可降低被限流的機率。
+  company_analysis_pause_seconds: 2.0
+  # 收到 429／5xx 時的重試設定（所有 OpenAI 相容 provider 共用）。
+  # 有 Retry-After 標頭時以標頭為準，沒有的話用指數退避加隨機抖動。
+  # rate_limit_max_retries: 0 等於關掉重試。
+  rate_limit_max_retries: 4
+  rate_limit_backoff_seconds: 5.0
+  rate_limit_max_backoff_seconds: 60.0
 
 # 與 X Stock Tracker（E:\X_stock_tracker）的整合。
 # 開啟後，每次公司觀點更新完，就把 Gooaye 這邊算出來的公司列以 source='gooaye'

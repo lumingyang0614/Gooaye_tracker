@@ -151,14 +151,20 @@ def _preflight(connection) -> str | None:
         "SELECT 1 FROM information_schema.tables WHERE table_name = :table"
     ), {"table": TABLE}).first()
     if not exists:
-        return f"{TABLE} 不存在；請先在 X Stock Tracker 執行 python -m scripts.init_postgres"
+        return (f"{TABLE} 不存在。請切換到 X Stock Tracker 的專案目錄"
+                "（例如 E:\\X_stock_tracker，不是 Gooaye 的目錄）執行："
+                " python -m scripts.init_postgres")
     has_source = connection.execute(text(
         "SELECT 1 FROM information_schema.columns "
         "WHERE table_name = :table AND column_name = 'source'"
     ), {"table": TABLE}).first()
     if not has_source:
-        return (f"{TABLE} 還沒有 source 欄位；請先在 X Stock Tracker 執行 "
-                "python -m scripts.migrate_company_view_source")
+        # Naming the directory matters: this script lives in the *other*
+        # project, and running it from Gooaye fails with "No module named
+        # scripts.migrate_company_view_source", which reads like a bug here.
+        return (f"{TABLE} 還沒有 source 欄位。這支遷移腳本屬於 X Stock Tracker，"
+                "請切換到該專案目錄（例如 E:\\X_stock_tracker，不是 Gooaye 的目錄）"
+                "用它自己的 venv 執行： python -m scripts.migrate_company_view_source")
     return None
 
 

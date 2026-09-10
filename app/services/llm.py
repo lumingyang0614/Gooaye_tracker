@@ -7,8 +7,13 @@ two projects' company-insight data stays comparable.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
+import random
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -166,6 +171,90 @@ def _message_content(message: dict[str, Any]) -> str:
     return reasoning if isinstance(reasoning, str) else ""
 
 
+# Statuses worth retrying: 429 is the rate limit that made a whole company
+# narrative pass return nothing (17 companies attempted, 2 completed, the
+# other 8 batches all rejected back-to-back), and 5xx are transient provider
+# faults. Anything else — a bad key, a bad model name, a malformed request —
+# will fail identically on a retry, so it is raised immediately.
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _retry_delay(response: httpx.Response, attempt: int, base_seconds: float, cap_seconds: float) -> float:
+    """How long to wait before retrying, preferring the provider's own answer.
+
+    A `Retry-After` header (seconds, or an HTTP date) is the provider telling
+    us exactly when it will accept traffic again; guessing a shorter backoff
+    just burns another request against the same limit. Without one, back off
+    exponentially with jitter so several concurrent callers don't retry in
+    lockstep and re-trigger the limit together.
+    """
+    header = response.headers.get("Retry-After", "").strip()
+    if header:
+        try:
+            return max(0.0, min(float(header), cap_seconds))
+        except ValueError:
+            with contextlib.suppress(Exception):
+                retry_at = parsedate_to_datetime(header)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                return max(0.0, min(delay, cap_seconds))
+    return min(base_seconds * (2 ** (attempt - 1)), cap_seconds) * (0.5 + random.random() / 2)
+
+
+async def paced(items, pause_seconds: float):
+    """Yield `items`, waiting `pause_seconds` between them.
+
+    The complement to _post_with_retries: that one recovers from a rate limit
+    already hit, this one keeps a loop from provoking it. Both of this
+    project's bulk model loops — episodes in sync.py, company batches in
+    company_insights.py — were firing requests back to back, which is how a
+    single run collected a 429 on every remaining item after the first few.
+
+    Never sleeps before the first item (nothing has been sent yet) or after
+    the last (nothing follows it), so N items cost N-1 pauses.
+    """
+    for index, item in enumerate(items):
+        if index and pause_seconds > 0:
+            await asyncio.sleep(pause_seconds)
+        yield item
+
+
+async def _post_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    *,
+    max_retries: int,
+    base_backoff: float,
+    max_backoff: float,
+) -> httpx.Response:
+    """POST, waiting out rate limits instead of surfacing them as failures.
+
+    A 429 used to propagate straight out of the caller, which for the company
+    narrative pass meant every remaining batch failed in turn and the run
+    finished with the mechanical fallback text for nearly every company. The
+    request is cheap to repeat and the provider tells us when to; retrying is
+    what the caller would otherwise have to do by hand.
+
+    The final attempt's response is returned as-is so `raise_for_status()`
+    still reports the real status when the limit genuinely outlasts us.
+    """
+    response = None
+    for attempt in range(1, max_retries + 2):
+        response = await client.post(url, json=payload, headers=headers)
+        if response.status_code not in _RETRY_STATUSES or attempt > max_retries:
+            return response
+        delay = _retry_delay(response, attempt, base_backoff, max_backoff)
+        logger.warning(
+            "Gooaye LLM 供應商暫時拒絕請求，等待後重試 | status=%s | attempt=%s/%s | sleep=%.1fs",
+            response.status_code, attempt, max_retries, delay,
+        )
+        await asyncio.sleep(delay)
+    return response
+
+
 async def _chat_openai_compatible(
     *,
     api_url: str,
@@ -195,6 +284,9 @@ async def _chat_openai_compatible(
     settings = get_settings()
     runtime = load_runtime_config().get("analysis", {})
     temperature = float(runtime.get("temperature", 0.1))
+    max_retries = max(0, int(runtime.get("rate_limit_max_retries", 4)))
+    base_backoff = max(0.0, float(runtime.get("rate_limit_backoff_seconds", 5.0)))
+    max_backoff = max(base_backoff, float(runtime.get("rate_limit_max_backoff_seconds", 60.0)))
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     last_error: Exception | None = None
     # B.ai does not receive response_format; the schema must be in the prompt.
@@ -217,7 +309,10 @@ async def _chat_openai_compatible(
                 payload["response_format"] = {"type": "json_schema", "json_schema": {"name": "gooaye_result", "strict": True, "schema": schema}}
             if reasoning_effort:
                 payload["reasoning_effort"] = reasoning_effort
-            response = await client.post(f"{api_url.rstrip('/')}/chat/completions", json=payload, headers=headers)
+            response = await _post_with_retries(
+                client, f"{api_url.rstrip('/')}/chat/completions", payload, headers,
+                max_retries=max_retries, base_backoff=base_backoff, max_backoff=max_backoff,
+            )
             response.raise_for_status()
             content = _message_content(response.json()["choices"][0]["message"])
             try:

@@ -39,7 +39,7 @@ from app.db import SessionLocal
 from app.models import CompanyInsight, EpisodeSegment
 from app.runtime_config import load_runtime_config
 from app.services.entity_resolver import canonicalize_symbol_map, resolve_market
-from app.services.llm import analyze_companies
+from app.services.llm import analyze_companies, paced
 from app.services.taiwan_securities import load_taiwan_security_lookup
 
 logger = logging.getLogger("uvicorn.error")
@@ -289,6 +289,12 @@ async def _write_company_narratives(
     doesn't discard narratives already written.
     """
     batch_size = max(1, int(config.get("company_analysis_batch_size", 2)))
+    # Space the batches out. The provider rate-limits per unit time, and this
+    # loop is the heaviest caller in the project: a 17-company run fires 9
+    # batches back to back, which is what tripped a 429 on every batch after
+    # the first two. llm.py retries an individual rejection; this is what
+    # stops the run provoking one in the first place.
+    pause_seconds = max(0.0, float(config.get("company_analysis_pause_seconds", 2.0)))
     segment_limit = max(1, int(config.get("company_analysis_segment_limit", 8)))
     characters = max(200, int(config.get("company_analysis_segment_characters", 600)))
     max_tokens = max(2048, int(config.get("company_analysis_max_tokens", 8192)))
@@ -297,7 +303,8 @@ async def _write_company_narratives(
     attempted = 0
     completed = 0
     failures: list[dict[str, Any]] = []
-    for start in range(0, len(symbols), batch_size):
+    starts = range(0, len(symbols), batch_size)
+    async for start in paced(starts, pause_seconds):
         batch = symbols[start:start + batch_size]
         blocks = {
             symbol: f"COMPANY: {names.get(symbol, symbol)}\n"

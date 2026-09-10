@@ -145,10 +145,14 @@ def test_concurrent_run_now_is_refused_rather_than_doubling_the_work(monkeypatch
     schedules()
     updater = BackgroundUpdates()
     started = asyncio.Event()
+    release = asyncio.Event()
 
+    # Held open by an event rather than a sleep: conftest stubs asyncio.sleep
+    # for the whole suite, so a sleep here would return instantly and the
+    # first run would be finished before the second one was attempted.
     async def slow_sync(limit=None):
         started.set()
-        await asyncio.sleep(0.2)
+        await release.wait()
         return {"affected_symbols": []}
 
     _stub(monkeypatch, sync=slow_sync)
@@ -157,6 +161,7 @@ def test_concurrent_run_now_is_refused_rather_than_doubling_the_work(monkeypatch
         first = asyncio.create_task(updater.run_episodes_now())
         await started.wait()
         second = await updater.run_episodes_now()
+        release.set()
         await first
         return second
 
