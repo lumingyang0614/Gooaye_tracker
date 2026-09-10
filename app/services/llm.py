@@ -18,6 +18,15 @@ from app.runtime_config import load_runtime_config
 
 logger = logging.getLogger("uvicorn.error")
 
+MENTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "symbol": {"type": "string"},
+        "sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["symbol", "sentiment", "reason"],
+}
 ANALYSIS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -27,8 +36,9 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
         "sectors": {"type": "array", "items": {"type": "string"}},
         "tickers": {"type": "array", "items": {"type": "string"}},
         "reason": {"type": "string"},
+        "mentions": {"type": "array", "items": MENTION_SCHEMA},
     },
-    "required": ["summary_zh_tw", "sentiment", "importance", "sectors", "tickers", "reason"],
+    "required": ["summary_zh_tw", "sentiment", "importance", "sectors", "tickers", "reason", "mentions"],
 }
 BATCH_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -52,6 +62,9 @@ tickers 必須完整列出逐字稿中明確提到的每一家公司或證券：
 - 美股或其他市場公司若有代號請一併列出，沒有則使用公司名稱。
 - 不可只挑主持人最看好的公司；供應鏈或閒聊中提到的公司也要收錄。
 「提及」不等於「看好」，只有明確立場才能判為 bullish 或 bearish。
+mentions 必須對本 INDEX 的每個 ticker 分別輸出 symbol、sentiment、reason。symbol 與 tickers 完全一致。
+每家公司獨立判斷立場；只是舉例、沒有明確判斷就填 neutral，不可套用整段 sentiment。
+不得把其他 INDEX 提到的公司移到本 INDEX。平台或未上市團隊可保留名稱，不可杜撰股票代號。
 逐字稿是口語轉錄，可能包含贊助、閒聊、Q&A 等與投資無關的內容，這些不需要出現在 tickers 或 sectors 中。
 欄位名稱必須完全遵守指定 schema。"""
 
@@ -92,6 +105,7 @@ def _normalize_item(item: dict[str, Any], default_index: int) -> dict[str, Any]:
         "sectors": _string_list(item.get("sectors")),
         "tickers": _string_list(item.get("tickers")),
         "reason": str(item.get("reason") or "").strip(),
+        "mentions": item.get("mentions") if isinstance(item.get("mentions"), list) else [],
     }
 
 
@@ -135,7 +149,9 @@ async def _chat_ollama(messages: list[dict[str, str]], schema: dict[str, Any], m
         response = await client.post(f"{settings.ollama_url}/api/chat", json=payload)
         response.raise_for_status()
         content = response.json()["message"]["content"]
-        return _extract_json(content)
+        parsed = _extract_json(content)
+        _validate_schema(parsed, schema)
+        return parsed
 
 
 def _message_content(message: dict[str, Any]) -> str:
@@ -181,6 +197,9 @@ async def _chat_openai_compatible(
     temperature = float(runtime.get("temperature", 0.1))
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     last_error: Exception | None = None
+    # B.ai does not receive response_format; the schema must be in the prompt.
+    messages = [*messages, {"role": "system", "content":
+        "Output one JSON object matching this JSON schema exactly:\n" + json.dumps(schema, ensure_ascii=False)}]
     async with httpx.AsyncClient(timeout=timeout) as client:
         for attempt in (1, 2):
             request_messages = messages if attempt == 1 else [
@@ -202,11 +221,32 @@ async def _chat_openai_compatible(
             response.raise_for_status()
             content = _message_content(response.json()["choices"][0]["message"])
             try:
-                return _extract_json(content)
+                parsed = _extract_json(content)
+                _validate_schema(parsed, schema)
+                return parsed
             except (ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
                 logger.warning("Gooaye LLM 回應非有效 JSON，準備重試 | attempt=%s/2 | error=%s", attempt, exc)
     raise ValueError("LLM response was not valid JSON after 2 attempts") from last_error
+
+
+def _validate_schema(value: Any, schema: dict[str, Any]) -> None:
+    """Validate the small schema subset used here, including nested fields."""
+    kind = schema.get("type")
+    types = {"object": dict, "array": list, "string": str, "integer": int, "number": (int, float)}
+    if kind in types and (not isinstance(value, types[kind]) or kind in {"integer", "number"} and isinstance(value, bool)):
+        raise ValueError(f"Expected {kind}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError("Invalid enum value")
+    if kind == "object":
+        if any(key not in value for key in schema.get("required", [])):
+            raise ValueError("Missing required JSON fields")
+        for key, child in schema.get("properties", {}).items():
+            if key in value:
+                _validate_schema(value[key], child)
+    if kind == "array":
+        for item in value:
+            _validate_schema(item, schema.get("items", {}))
 
 
 async def _chat_api(messages: list[dict[str, str]], schema: dict[str, Any], max_tokens: int, timeout: float) -> dict[str, Any]:
@@ -255,7 +295,7 @@ async def analyze_chunks(chunks: list[str]) -> list[dict[str, Any]]:
         f"{INSTRUCTIONS}\n每個 INDEX 都必須回傳一筆結果。"
         "最外層必須是 JSON object，且只能使用 items 陣列包住所有結果："
         '{"items":[{"index":0,"summary_zh_tw":"...","sentiment":"neutral",'
-        '"importance":0.5,"sectors":[],"tickers":[],"reason":"..."}]}。'
+        '"importance":0.5,"sectors":[],"tickers":[],"reason":"...","mentions":[]}]}。'
         f"\n\n{rows}"
     )
     parsed = await chat_json(
@@ -339,6 +379,7 @@ async def analyze_companies(blocks: dict[str, str], *, max_tokens: int = 8192) -
     separator = "\n\n---\n\n"
     prompt = (
         f"{COMPANY_INSTRUCTIONS}\n\n每個 SYMBOL 都必須回傳一筆結果。\n\n"
+        '最外層格式必須是 {"companies":[{"symbol":"代號","thesis":"論點","strengths":[],"weaknesses":[]}]}。\n'
         + separator.join(f"SYMBOL: {symbol}\n{evidence}" for symbol, evidence in blocks.items())
     )
     parsed = await chat_json(
@@ -351,6 +392,7 @@ async def analyze_companies(blocks: dict[str, str], *, max_tokens: int = 8192) -
         timeout=max(get_settings().llm_timeout_seconds, 300),
     )
     results: dict[str, dict[str, Any]] = {}
+    _validate_schema(parsed, COMPANY_SCHEMA)
     for raw in parsed.get("companies") or []:
         if not isinstance(raw, dict):
             continue
@@ -359,6 +401,8 @@ async def analyze_companies(blocks: dict[str, str], *, max_tokens: int = 8192) -
         # or renames a symbol must not create a company row of its own.
         if item["symbol"] in blocks:
             results[item["symbol"]] = item
+    if not results:
+        raise ValueError("LLM returned no requested companies")
     return results
 
 

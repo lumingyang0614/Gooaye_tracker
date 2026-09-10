@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import Episode, EpisodeSegment
+from app.models import Episode, EpisodeSegment, SegmentCompanyStance
 from app.runtime_config import load_runtime_config
 from app.services import feed as feed_service
 from app.services import transcripts_pack
@@ -230,6 +230,23 @@ def _canonicalized_segment_rows(analyses: list[dict[str, Any]]) -> list[dict[str
     rows = []
     for chunk_index, item in enumerate(analyses):
         tickers = sorted(canonicalize_symbols({value.upper() for value in item["tickers"]}))
+        votes: dict[str, list[dict]] = {}
+        for mention in item.get("mentions", []):
+            if not isinstance(mention, dict) or not mention.get("symbol"):
+                continue
+            for symbol in canonicalize_symbols({str(mention['symbol']).upper()}):
+                if symbol in tickers:
+                    votes.setdefault(symbol, []).append(mention)
+        company_stances = []
+        if "mentions" in item:
+            for symbol in tickers:
+                values = votes.get(symbol, [])
+                sentiments = {v.get('sentiment') for v in values}
+                sentiment = next(iter(sentiments)) if len(sentiments) == 1 else 'neutral'
+                if sentiment not in {'bullish', 'bearish', 'neutral'}:
+                    sentiment = 'neutral'
+                company_stances.append({'symbol': symbol, 'sentiment': sentiment,
+                    'reason': '；'.join(str(v.get('reason', '')) for v in values) or '未取得此公司的明確立場'})
         rows.append({
             "chunk_index": chunk_index,
             "sentiment": item["sentiment"],
@@ -237,6 +254,7 @@ def _canonicalized_segment_rows(analyses: list[dict[str, Any]]) -> list[dict[str
             "tickers": tickers,
             "summary": item["summary_zh_tw"],
             "reason": item["reason"],
+            "company_stances": company_stances,
         })
     return rows
 
@@ -263,6 +281,8 @@ async def _analyze_episode(session: Session, row: Episode, sync_cfg: dict[str, A
     # Re-analysis (e.g. a Whisper-filled episode later replaced by the
     # written transcript) must replace this episode's old segments rather
     # than append duplicates alongside them.
+    session.execute(delete(SegmentCompanyStance).where(SegmentCompanyStance.segment_id.in_(
+        select(EpisodeSegment.id).where(EpisodeSegment.episode_id == row.id))))
     session.execute(delete(EpisodeSegment).where(EpisodeSegment.episode_id == row.id))
     for segment in segment_rows:
         session.add(EpisodeSegment(
@@ -273,6 +293,7 @@ async def _analyze_episode(session: Session, row: Episode, sync_cfg: dict[str, A
             tickers=",".join(segment["tickers"]),
             summary=segment["summary"],
             reason=segment["reason"],
+            company_stances=[SegmentCompanyStance(**vote) for vote in segment['company_stances']],
         ))
 
     sentiments = Counter(item["sentiment"] for item in analyses)

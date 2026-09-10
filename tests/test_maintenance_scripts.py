@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import scripts
 from app.models import Base, CompanyInsight, Episode, EpisodeSegment
 from scripts import backfill_segment_tickers as backfill
 from scripts import migrate_company_market as migration
@@ -120,3 +121,38 @@ def test_backfill_reports_nothing_to_do_when_already_canonical(database, monkeyp
     monkeypatch.setattr(backfill, "canonicalize_symbol_map", lambda values: {"3036.TW": "3036.TW"})
 
     assert backfill.backfill() == {"segments": 0, "episodes": 0, "distinct_symbols_seen": 1}
+
+
+class _Reconfigurable:
+    def __init__(self):
+        self.calls = []
+
+    def reconfigure(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+class _Raising(_Reconfigurable):
+    def reconfigure(self, **kwargs):
+        raise ValueError("stream does not support reconfiguration")
+
+
+def test_console_is_pinned_to_utf8_for_script_output(monkeypatch):
+    """Sync summaries print affected_symbols, which can hold an unresolved
+    Simplified Chinese company name that cp950 cannot encode — losing a run
+    that had already completed all of its work."""
+    stdout, stderr = _Reconfigurable(), _Reconfigurable()
+    monkeypatch.setattr("sys.stdout", stdout)
+    monkeypatch.setattr("sys.stderr", stderr)
+
+    scripts._force_utf8_console()
+
+    assert stdout.calls == [{"encoding": "utf-8", "errors": "replace"}]
+    assert stderr.calls == [{"encoding": "utf-8", "errors": "replace"}]
+
+
+@pytest.mark.parametrize("stream", [object(), _Raising()])
+def test_streams_that_cannot_be_reconfigured_are_left_alone(monkeypatch, stream):
+    # pytest's capture and shell redirection both replace these; refusing to
+    # start because a progress stream is unusual would be far worse.
+    monkeypatch.setattr("sys.stdout", stream)
+    scripts._force_utf8_console()

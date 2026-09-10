@@ -72,6 +72,13 @@ def _run_transcription_worker(path: Path, model_size: str, device: str) -> str:
     creationflags = 0
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
+    # The worker writes the transcript as raw UTF-8 bytes, but anything else
+    # reaching stdout/stderr — a library warning, a traceback carrying Chinese
+    # text — still goes through Python's text layer, which defaults to the
+    # console ANSI codepage (cp950 here) and cannot encode Simplified Chinese.
+    # Pinning the child's IO encoding keeps those paths from failing too, and
+    # keeps stderr decodable when the worker really does crash.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     result = subprocess.run(
         command,
         cwd=Path(__file__).resolve().parents[2],
@@ -80,6 +87,7 @@ def _run_transcription_worker(path: Path, model_size: str, device: str) -> str:
         encoding="utf-8",
         errors="replace",
         creationflags=creationflags,
+        env=env,
         check=False,
     )
     if result.returncode != 0:

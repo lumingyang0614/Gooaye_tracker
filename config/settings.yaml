@@ -47,7 +47,7 @@ analysis:
 # （`python -m scripts.sync_taiwan_securities`），用來補上主檔沒有的俗稱、
 # 英文簡稱與非台股公司。
 # 每筆可另外指定 market（TW／US／OTHER／UNKNOWN）；未指定時由代號自動判斷
-# （.TW→TW、其他市場後綴→OTHER、純英文字母 1-5 碼→US），只有在代號會誤導時
+# （.TW→TW、其他已知市場後綴→OTHER、種子確認的英文代號→US），只有在代號會誤導時
 # 才需要手動指定，例如台積電 ADR「TSM」在美國掛牌，應標成 US。
 company_aliases:
   - {symbol: "2330.TW", company_name: 台積電, aliases: [TSMC, 台積電, "2330", "2330.TW"]}

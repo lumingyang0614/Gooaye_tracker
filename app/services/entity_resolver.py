@@ -195,10 +195,10 @@ def resolve_market(symbol: str) -> str:
         if external_market:
             return "OTHER"
 
-    # A bare A-Z ticker of 1-5 characters is the US convention (NVDA, MU,
-    # GOOGL). Bare digits are NOT treated as Taiwanese here: if a 4-digit code
-    # were a Taiwan listing it would already have matched the master above, so
-    # what is left is more likely a Japanese or Chinese code.
-    if upper.isascii() and upper.isalpha() and 1 <= len(upper) <= 5:
+    # Bare symbols require a trusted seed or master entry. Names and platforms
+    # can have the same spelling shape as US tickers; leave them unconfirmed.
+    # Shape alone cannot distinguish a ticker from a platform such as STEAM.
+    known_seed_symbols = {str(c.get("symbol", "")).strip().upper() for c in _seed_companies()}
+    if upper in known_seed_symbols and upper.isascii() and upper.isalpha() and 1 <= len(upper) <= 5:
         return "US"
     return "UNKNOWN"

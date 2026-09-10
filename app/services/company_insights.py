@@ -28,6 +28,9 @@ import logging
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
+from types import SimpleNamespace
+
+import httpx
 
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
@@ -91,6 +94,7 @@ def _segments_by_symbol() -> dict[str, list[EpisodeSegment]]:
         for value in segment.tickers.split(",")
         if value.strip()
     }
+    raw_symbols.update(vote.symbol for segment in segments for vote in segment.company_stances)
     canonical = canonicalize_symbol_map(raw_symbols)
     grouped: dict[str, list[EpisodeSegment]] = defaultdict(list)
     for segment in segments:
@@ -100,7 +104,17 @@ def _segments_by_symbol() -> dict[str, list[EpisodeSegment]]:
             if value.strip()
         }
         for symbol in symbols:
-            grouped[symbol].append(segment)
+            votes = [v for v in segment.company_stances if canonical.get(v.symbol, v.symbol) == symbol]
+            if votes:
+                sentiments = {v.sentiment for v in votes}
+                # A view avoids mutating the shared segment for another company.
+                view = SimpleNamespace(**{key: getattr(segment, key) for key in
+                    ('episode', 'chunk_index', 'importance', 'summary', 'sentiment', 'reason')})
+                view.sentiment = next(iter(sentiments)) if len(sentiments) == 1 else 'neutral'
+                view.reason = '；'.join(v.reason for v in votes)
+                grouped[symbol].append(view)
+            else:
+                grouped[symbol].append(segment)
     return grouped
 
 
@@ -187,7 +201,7 @@ async def rebuild_company_insights(
         # so a model failure mid-run still leaves every row readable.
         session.commit()
 
-    llm_result = {"attempted": 0, "completed": 0}
+    llm_result = {"attempted": 0, "completed": 0, "failures": []}
     if use_llm and live_symbols:
         llm_result = await _write_company_narratives(live_symbols, grouped, config)
 
@@ -197,13 +211,15 @@ async def rebuild_company_insights(
         "symbols_removed": removed,
         "narratives_attempted": llm_result["attempted"],
         "narratives_completed": llm_result["completed"],
+        "narrative_failures": llm_result["failures"],
     }
 
 
 def _apply_insight(row: CompanyInsight, symbol: str, segments: list[EpisodeSegment], names: dict[str, str]) -> None:
     """Mechanical stage: everything derivable from the segments themselves."""
     stances = Counter(segment.sentiment for segment in segments)
-    stance = max(("bullish", "bearish", "neutral"), key=lambda key: stances[key])
+    winners = [key for key in ("bullish", "bearish", "neutral") if stances[key] == max(stances.values())]
+    stance = winners[0] if len(winners) == 1 else "neutral"
     top = _top_segments(segments, limit=3)
     mentioned_episodes = {segment.episode.episode_number for segment in segments}
 
@@ -256,6 +272,8 @@ def _evidence_block(segments: list[EpisodeSegment], segment_limit: int, characte
         lines.append(
             f"[EP{segment.episode.episode_number} · {segment.sentiment} · 重要度 {segment.importance:.2f}] {summary}"
         )
+        if segment.reason:
+            lines.append(f"本公司立場依據：{segment.reason[:characters]}")
     return "\n".join(lines)
 
 
@@ -263,7 +281,7 @@ async def _write_company_narratives(
     symbols: list[str],
     grouped: dict[str, list[EpisodeSegment]],
     config: dict[str, Any],
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Stage 2: ask the LLM for a thesis and strengths/weaknesses per company.
 
     Batched to keep the number of round trips proportional to companies rather
@@ -278,6 +296,7 @@ async def _write_company_narratives(
     names = _company_names()
     attempted = 0
     completed = 0
+    failures: list[dict[str, Any]] = []
     for start in range(0, len(symbols), batch_size):
         batch = symbols[start:start + batch_size]
         blocks = {
@@ -292,12 +311,25 @@ async def _write_company_narratives(
         try:
             results = await analyze_companies(blocks, max_tokens=max_tokens)
         except Exception as exc:
+            failure: dict[str, Any] = {"symbols": list(blocks), "error": type(exc).__name__}
+            if isinstance(exc, httpx.HTTPStatusError):
+                failure['status'] = exc.response.status_code
+                try:
+                    error = exc.response.json().get('error', {})
+                    if isinstance(error, dict) and isinstance(error.get('code'), (str, int)):
+                        failure['provider_code'] = error['code']
+                except (ValueError, AttributeError):
+                    pass
+            failures.append(failure)
             logger.exception(
                 "Gooaye 公司觀點分析失敗，保留逐段彙整結果 | symbols=%s | error=%s: %s",
                 ",".join(batch), type(exc).__name__, exc,
             )
             continue
 
+        missing = sorted(set(blocks) - set(results))
+        if missing:
+            failures.append({"symbols": missing, "error": "MissingCompanyResults"})
         with SessionLocal() as session:
             for symbol, item in results.items():
                 row = session.scalar(select(CompanyInsight).where(CompanyInsight.symbol == symbol))
@@ -315,7 +347,7 @@ async def _write_company_narratives(
 
     if attempted and completed < attempted:
         logger.warning("部分公司未取得模型論點，維持逐段彙整結果 | attempted=%s | completed=%s", attempted, completed)
-    return {"attempted": attempted, "completed": completed}
+    return {"attempted": attempted, "completed": completed, "failures": failures}
 
 
 def list_symbol_segments(symbol: str) -> list[dict[str, Any]]:

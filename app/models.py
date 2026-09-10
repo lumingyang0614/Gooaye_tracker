@@ -71,6 +71,19 @@ class EpisodeSegment(Base):
     )
 
     episode: Mapped["Episode"] = relationship()
+    company_stances: Mapped[list["SegmentCompanyStance"]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class SegmentCompanyStance(Base):
+    """Company-specific votes; a new table keeps existing segment schemas readable."""
+    __tablename__ = "segment_company_stances"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    segment_id: Mapped[int] = mapped_column(ForeignKey("episode_segments.id", ondelete="CASCADE"), index=True)
+    symbol: Mapped[str] = mapped_column(String(200), index=True)
+    sentiment: Mapped[str] = mapped_column(String(16), default="neutral")
+    reason: Mapped[str] = mapped_column(Text, default="")
 
 
 class CompanyInsight(Base):
