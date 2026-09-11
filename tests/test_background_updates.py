@@ -176,7 +176,8 @@ def test_disabled_schedules_start_no_tasks(schedules):
     updater.start()
 
     assert updater.status == {"enabled": False, "episode_sync": {"state": "disabled"},
-                              "taiwan_securities": {"state": "disabled"}}
+                              "taiwan_securities": {"state": "disabled"},
+                              "merge_refresh": {"state": "disabled"}}
     assert updater._tasks == []
 
 
@@ -189,7 +190,8 @@ def test_individual_jobs_can_be_disabled(schedules):
         try:
             assert updater.status["episode_sync"] == {"state": "disabled"}
             assert updater.status["taiwan_securities"]["state"] == "waiting"
-            assert len(updater._tasks) == 1
+            assert updater.status["merge_refresh"]["state"] == "waiting"
+            assert len(updater._tasks) == 2
         finally:
             await updater.stop()
 
@@ -218,9 +220,61 @@ def test_stop_cancels_every_task(schedules):
     async def scenario():
         updater = BackgroundUpdates()
         updater.start()
-        assert len(updater._tasks) == 2
+        assert len(updater._tasks) == 3
         await updater.stop()
         return updater
 
     updater = asyncio.run(scenario())
     assert updater._tasks == []
+
+
+# --- the merge-refresh job ---------------------------------------------------
+
+def test_merge_refresh_runs_a_full_pass(monkeypatch, schedules):
+    """Scoping it to what this project touched would defeat the purpose: the
+    job exists to catch rows the *other* tracker wrote on its own schedule,
+    which nothing here has a symbol list for."""
+    schedules()
+    calls = []
+
+    async def fake_rebuild(selected_symbols=None, *, use_llm=True, force=False):
+        calls.append((selected_symbols, use_llm, force))
+        return {"merged": 3, "unchanged": 50}
+
+    monkeypatch.setattr(module, "rebuild_merged_views", fake_rebuild)
+    result = asyncio.run(BackgroundUpdates().refresh_merged_views())
+
+    assert calls == [(None, True, False)]
+    assert result["unchanged"] == 50
+
+
+def test_merge_refresh_can_be_disabled(schedules):
+    schedules(enabled=True, merge_refresh_enabled=False)
+
+    async def scenario():
+        updater = BackgroundUpdates()
+        updater.start()
+        try:
+            assert updater.status["merge_refresh"] == {"state": "disabled"}
+            assert not any("merge" in task.get_name() for task in updater._tasks)
+        finally:
+            await updater.stop()
+
+    asyncio.run(scenario())
+
+
+def test_merge_refresh_interval_has_a_floor(schedules):
+    """Each tick is two queries plus any fusion it finds work for; a 0-hour
+    typo would sit in a loop against the other project's database."""
+    schedules(enabled=True, merge_refresh_hours=0,
+              episode_sync_enabled=False, taiwan_security_sync_enabled=False)
+
+    async def scenario():
+        updater = BackgroundUpdates()
+        updater.start()
+        try:
+            assert updater.status["merge_refresh"]["interval_seconds"] == 3600
+        finally:
+            await updater.stop()
+
+    asyncio.run(scenario())

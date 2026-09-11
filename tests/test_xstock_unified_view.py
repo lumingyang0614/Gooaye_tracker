@@ -172,3 +172,17 @@ def test_symbols_are_normalized_so_case_does_not_split_a_company(connection):
     rows = connection.execute(text(
         f"SELECT symbol FROM {VIEW_NAME} WHERE symbol = 'ZZCASE'")).all()
     assert len(rows) == 1
+
+
+# --- grants survive a rebuild ------------------------------------------------
+
+def test_public_is_not_quoted_as_if_it_were_a_role_name():
+    """GRANT ... TO "PUBLIC" creates a grant to a role nobody has; the keyword
+    has to go through bare or the rebuild quietly revokes everyone's access."""
+    granted = [s for s in statements(["PUBLIC"]) if s.startswith("GRANT")]
+    assert granted == [f"GRANT SELECT ON {VIEW_NAME} TO PUBLIC"]
+
+
+def test_roles_are_not_granted_twice():
+    granted = [s for s in statements(["gooaye", "Gooaye", " gooaye "]) if s.startswith("GRANT")]
+    assert len(granted) == 1

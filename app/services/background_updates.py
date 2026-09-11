@@ -1,7 +1,7 @@
 """Periodic background jobs, so a running Gooaye Tracker picks up new 股癌
 episodes on its own instead of waiting for someone to POST /api/sync.
 
-Two independent loops, each with its own interval and its own lock:
+Three independent loops, each with its own interval and its own lock:
 
 * `episode_sync` runs the full pipeline in app/services/sync.py — fetch the
   transcript pack and RSS feed, analyze what is new, rebuild the affected
@@ -11,6 +11,13 @@ Two independent loops, each with its own interval and its own lock:
 * `taiwan_securities` refreshes the TWSE/TPEx listing table daily, so a newly
   listed company resolves to a real ticker rather than being stored as the raw
   Chinese name the model produced.
+* `merge_refresh` re-fuses the merged company views. sync.py already re-fuses
+  the companies *this* project touched, but the other tracker writes into the
+  same table on its own schedule and cannot call anything here; without this
+  loop an X-side update would sit behind a stale merged row until someone ran
+  the script by hand. Companies whose merged row is already newer than both
+  sources are skipped, so a tick that finds nothing new costs two queries and
+  no model calls.
 
 Modeled on X Stock Tracker's app/services/background_updates.py so both
 projects' schedulers behave and report identically (same status shape, same
@@ -30,6 +37,7 @@ from typing import Any, Awaitable, Callable
 
 from app.runtime_config import load_runtime_config
 from app.services.company_insights import rebuild_company_insights
+from app.services.merged_views import rebuild_merged_views
 from app.services.sync import sync_gooaye
 from app.services.taiwan_securities import sync_taiwan_securities
 from app.services.xstock_push import push_company_insights
@@ -47,10 +55,12 @@ class BackgroundUpdates:
         self._tasks: list[asyncio.Task[None]] = []
         self._episode_lock = asyncio.Lock()
         self._securities_lock = asyncio.Lock()
+        self._merge_lock = asyncio.Lock()
         self.status: dict[str, Any] = {
             "enabled": False,
             "episode_sync": {"state": "waiting"},
             "taiwan_securities": {"state": "waiting"},
+            "merge_refresh": {"state": "waiting"},
         }
 
     def start(self) -> None:
@@ -60,6 +70,7 @@ class BackgroundUpdates:
                 "enabled": False,
                 "episode_sync": {"state": "disabled"},
                 "taiwan_securities": {"state": "disabled"},
+                "merge_refresh": {"state": "disabled"},
             }
             logger.info("背景排程未啟動 | reason=schedules.enabled=false")
             return
@@ -79,6 +90,7 @@ class BackgroundUpdates:
         jobs = (
             ("episode_sync", "episode_sync_enabled", "episode_sync_hours", 6, 3600, self.refresh_episodes),
             ("taiwan_securities", "taiwan_security_sync_enabled", "taiwan_security_sync_hours", 24, 3600, self.refresh_taiwan_securities),
+            ("merge_refresh", "merge_refresh_enabled", "merge_refresh_hours", 6, 3600, self.refresh_merged_views),
         )
         for name, enabled_key, hours_key, default_hours, floor_seconds, operation in jobs:
             if not config.get(enabled_key, True):
@@ -194,6 +206,18 @@ class BackgroundUpdates:
             insights = await rebuild_company_insights(use_llm=False)
             return {"securities": securities, "company_insights": insights,
                     "xstocktracker_push": push_company_insights()}
+
+    async def refresh_merged_views(self) -> dict[str, Any]:
+        """Bring the merged company views back in line with both trackers.
+
+        A full pass, because the point is to catch what this project did not
+        do: rows the other tracker wrote or withdrew on its own schedule.
+        Unchanged companies are skipped inside rebuild_merged_views, so the
+        usual tick does no model work at all.
+        """
+        async with self._merge_lock:
+            logger.info("自動重建合併觀點")
+            return await rebuild_merged_views()
 
 
 background_updates = BackgroundUpdates()

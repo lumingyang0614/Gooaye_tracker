@@ -45,6 +45,28 @@ def _own_role(default_dsn: str) -> str:
         return ""
 
 
+def _existing_readers(connection) -> list[str]:
+    """Roles that can already SELECT the view, so a rebuild does not cut them off.
+
+    Read from the catalog rather than information_schema.role_table_grants:
+    that view only reports grants whose grantor or grantee is a currently
+    enabled role, so a grant to PUBLIC — the one that silently gives every
+    consumer access — does not appear there at all, and dropping the view
+    would have revoked it with nothing to put it back.
+
+    aclexplode reports PUBLIC as grantee 0. A relacl of NULL means no explicit
+    grants have ever been made, and to_regclass yields NULL (matching no rows)
+    when the view does not exist yet, so the first run finds nothing.
+    """
+    rows = connection.execute(text("""
+        SELECT DISTINCT
+            CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee
+        FROM pg_class c, aclexplode(c.relacl) a
+        WHERE c.oid = to_regclass(:view) AND a.privilege_type = 'SELECT'
+    """), {"view": VIEW_NAME}).scalars().all()
+    return [str(role) for role in rows if role]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="建立跨來源合併的公司觀點 view")
     parser.add_argument("--dsn", default="", help="有 CREATE 權限的連線字串（預設用 XSTOCKTRACKER_DB_URL）")
@@ -69,6 +91,11 @@ def main() -> None:
     engine = create_engine(_psycopg(dsn), pool_pre_ping=True)
     try:
         with engine.begin() as connection:
+            # Re-running drops the view, and dropping it drops its grants. A
+            # consumer that connects as its own account would silently lose
+            # access unless whoever re-ran this happened to remember to pass
+            # --reader-role for it, so carry the existing grantees forward.
+            readers = _existing_readers(connection) + [r for r in readers if r]
             for statement in statements(readers):
                 connection.execute(text(statement))
             total = connection.execute(text(f"SELECT count(*) FROM {VIEW_NAME}")).scalar()

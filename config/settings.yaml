@@ -69,6 +69,7 @@ xstocktracker:
   # 合併觀點：把「股癌的看法」與「X 分析師社群的看法」用 LLM 融合成一份，
   # 以 source='merged' 寫回 x_company_views，給下游（LINE bot /觀點）讀取。
   # 只有兩邊都收錄的公司才會呼叫 LLM；只有單一來源的公司直接機械沿用，不花錢。
+  # 而且只有「來源比 merged 列新」的公司才會重做，沒變動的直接跳過。
   merge_llm_enabled: true
   merge_batch_size: 2
   merge_pause_seconds: 2.0
@@ -87,6 +88,12 @@ schedules:
   # 每次背景同步最多分析幾集；留空則用 sync.incremental_new_limit。
   episode_sync_limit: 5
   taiwan_security_sync_hours: 24
+  # 重建合併觀點。同步流程本來就會重融合「這次動到的公司」，這個排程補的是另一邊：
+  # X Stock Tracker 會自己寫進同一張表，但它叫不到這裡，沒有這個迴圈的話它的更新
+  # 會一直被舊的 merged 列蓋住。merged 列已經比兩邊來源新的公司會直接跳過，所以
+  # 沒有新東西的那一輪只花兩個查詢、不呼叫模型。
+  merge_refresh_enabled: true
+  merge_refresh_hours: 6
 
 # 台股公司名稱／代號別名，供把 LLM 抽取出的中文公司名稱還原成證券代號使用。
 # 這份是「手動維護的種子清單」，優先權高於 TWSE／TPEx 證券主檔

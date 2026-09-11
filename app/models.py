@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -141,6 +141,32 @@ class TaiwanSecurity(Base):
     industry: Mapped[str] = mapped_column(String(120), default="")
     source: Mapped[str] = mapped_column(String(120), default="")
     is_active: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class MergedViewState(Base):
+    """What the last merge pass actually produced for each company.
+
+    The merged rows themselves live in X Stock Tracker's x_company_views, which
+    has no column saying how a row was produced — and inferring it from that
+    row's own timestamp is exactly what broke: a fusion that failed still wrote
+    a fallback row stamped "now", so the next pass saw something newer than
+    both sources and skipped the retry forever. The same went for rows written
+    by `--no-llm`, which could never be upgraded afterwards.
+
+    So the bookkeeping lives here, on Gooaye's side, where it can change
+    without migrating a table the other project owns. `fingerprint` records
+    which source rows the merged row was built from and what version each was,
+    so a source being *removed* is as visible as a source being updated.
+    """
+
+    __tablename__ = "merged_view_state"
+
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(Text, default="")
+    fused: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

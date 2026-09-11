@@ -44,11 +44,23 @@ ORDER BY upper(btrim(symbol)),
 """
 
 
+def _grantee(role: str) -> str:
+    """PUBLIC is a keyword, not a role name — quoting it grants to nobody."""
+    name = role.strip()
+    return "PUBLIC" if name.upper() == "PUBLIC" else f'"{name}"'
+
+
 def statements(reader_roles: list[str]) -> list[str]:
     """Every statement needed to (re)create the view, in order.
 
     `reader_roles` get SELECT on the view — the account the consumer connects
     as. A superuser needs no grant but is harmless to include.
+
+    Dropping the view also drops its grants, so a caller that re-runs this must
+    pass every role that could already read it, not just the ones it wants to
+    add; scripts/create_unified_view.py reads the existing grantees back out of
+    the catalog for exactly that reason. Getting it wrong silently cuts off a
+    consumer that connects as its own account.
     """
     # CREATE OR REPLACE cannot remove a column from an existing view, so a
     # changed definition has to drop first. Callers run these in one
@@ -59,9 +71,11 @@ def statements(reader_roles: list[str]) -> list[str]:
         "DROP FUNCTION IF EXISTS public.gooaye_json_array(text)",
         _VIEW_SQL.strip(),
     ]
+    seen = set()
     for role in reader_roles:
-        if role and role.strip():
-            sql.append(f'GRANT SELECT ON {VIEW_NAME} TO "{role.strip()}"')
+        if role and role.strip() and role.strip().lower() not in seen:
+            seen.add(role.strip().lower())
+            sql.append(f"GRANT SELECT ON {VIEW_NAME} TO {_grantee(role)}")
     return sql
 
 
