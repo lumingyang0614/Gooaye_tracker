@@ -527,13 +527,16 @@ MERGED_SCHEMA: dict[str, Any] = {
 # cannot do mechanically is decide what the two views jointly imply — where
 # they reinforce each other, where they genuinely conflict, and which variable
 # actually matters. Hence the explicit ban on per-source bullet lists.
-MERGED_INSTRUCTIONS = """你是股票研究資料整理員。每個 SYMBOL 區塊會給你同一家公司的兩份既有觀點：
-一份來自《股癌》Podcast 的逐字稿分析，一份來自 X 上的分析師社群彙總。
+MERGED_INSTRUCTIONS = """你是股票研究資料整理員。每個 SYMBOL 區塊會給你同一家公司的兩份既有觀點，
+標為「觀點A」與「觀點B」。這兩份的來源身分與你的工作無關，也不會告訴你。
 
 請把它們**融合成一份觀點**，不是並列兩份：
 - thesis：用繁體中文寫出整合後的核心論點，最多 300 字。要寫出這家公司目前的關鍵變數與判斷依據。
-  兩邊講到同一件事時合併成一句，不要重複；兩邊有分歧時，直接在論點裡說明分歧在哪、各自的理由是什麼。
-  **嚴禁**寫成「股癌認為…；X 分析師認為…」這種分段並列，也不要提及個別分析師或來源名稱。
+  兩邊講到同一件事時合併成一句，不要重複；兩邊有分歧時，說明分歧在哪、兩種解讀各自的理由是什麼，
+  寫成「一種解讀是…另一種解讀是…」這種就事論事的寫法，**不要寫是誰說的**。
+  **嚴禁**分段並列，也嚴禁在輸出中出現「觀點A」「觀點B」「股癌」「Podcast」「逐字稿」「社群」
+  「貼文」「分析師」或任何指涉來源、載體、平台的字眼。讀者要看到的是對這家公司的一份判斷，
+  而不是一份關於「誰說了什麼」的整理。
 - stance：整合後的整體立場，只能是 bullish／bearish／neutral／mixed。
   兩邊方向一致就用該方向；方向相反且都有實質理由時用 mixed；證據薄弱或中性時用 neutral。
 - strengths：整合後的正面理由，最多 5 點，每點最多 60 字。兩邊重複的合併成一點。

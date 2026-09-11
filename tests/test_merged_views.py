@@ -26,6 +26,7 @@ from app.services.merged_views import (
     _is_stale,
     _mechanical_row,
     rebuild_merged_views,
+    source_leak,
 )
 from app.services.llm import MERGED_INSTRUCTIONS, _normalize_merged
 
@@ -99,7 +100,7 @@ def wired(monkeypatch):
             calls.append(sorted(blocks))
             if synthesis == "fail":
                 raise RuntimeError("provider down")
-            thesis = "" if synthesis == "empty" else "融合論點"
+            thesis = {"empty": "", "leak": "X社群單一貼文指其調漲報價"}.get(synthesis, "融合論點")
             return {symbol: {"symbol": symbol, "stance": "mixed", "thesis": thesis,
                              "strengths": ["合併優勢"], "weaknesses": ["合併風險"]}
                     for symbol in blocks}
@@ -550,3 +551,44 @@ def test_a_bad_dsn_is_reported_not_raised(wired):
     wired([], engine_error=ValueError("Could not parse SQLAlchemy URL"))
     result = asyncio.run(rebuild_merged_views())
     assert result["error"] == "ValueError"
+
+
+# --- the merged row must not say who said what -------------------------------
+
+def test_the_evidence_labels_do_not_name_the_sources():
+    """Handing the model "《股癌》Podcast 逐字稿分析" and then forbidding it to
+    mention sources produced theses like "X社群單一貼文指其調漲報價…而逐字稿
+    分析多持保留態度". Keeping the two views apart needs no names."""
+    from app.services.merged_views import _LABELS
+    for label in _LABELS.values():
+        assert not source_leak(label.replace("觀點A", "").replace("觀點B", "")), label
+    assert set(_LABELS.values()) == {"觀點A", "觀點B"}
+
+
+def test_prompt_bans_naming_the_source_and_the_placeholders():
+    for banned in ("觀點A", "股癌", "逐字稿", "社群", "貼文", "分析師"):
+        assert banned in MERGED_INSTRUCTIONS, f"{banned} 必須列在禁用字裡"
+    assert "不要寫是誰說的" in MERGED_INSTRUCTIONS
+
+
+@pytest.mark.parametrize("thesis,expected", [
+    ("X社群單一貼文指其調漲報價，而逐字稿分析持保留態度", "社群"),
+    ("股癌認為記憶體看好", "股癌"),
+    ("觀點A偏多，觀點B偏空", "觀點A"),
+    ("市場分析師普遍看好", "分析師"),
+    ("一種解讀是漲價反映景氣強勁，另一種解讀是成本推升而非需求拉動", ""),
+    ("美光的核心變數在於 AI 記憶體需求的持續性與技術規格演進。", ""),
+])
+def test_source_leak_detector(thesis, expected):
+    assert source_leak(thesis) == expected
+
+
+def test_a_leaking_thesis_is_reported_but_still_used(wired, caplog):
+    """Discarding it would cost another call for something no more likely to
+    comply, and the fused text is still better than the mechanical rollup."""
+    engine, _ = wired([_row(SOURCE_GOOAYE), _row(SOURCE_X)], synthesis="leak")
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(rebuild_merged_views())
+    assert result["synthesized"] == 1
+    assert "融合論點提及了來源" in caplog.text
+    assert _written(engine)[0]["thesis"].startswith("X社群")

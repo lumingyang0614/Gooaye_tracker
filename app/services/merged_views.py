@@ -64,16 +64,32 @@ SOURCE_X = "x"
 #: call, so an unrecognised source bought a call that then sent one view.
 FUSABLE_SOURCES = (SOURCE_GOOAYE, SOURCE_X)
 
-# Human-readable labels for the evidence block. The prompt forbids echoing
-# these back, but the model still needs to know which view is which to notice
-# that they disagree.
-_LABELS = {SOURCE_GOOAYE: "《股癌》Podcast 逐字稿分析", SOURCE_X: "X 分析師社群彙總"}
+# Deliberately anonymous. The model needs the two views kept apart to notice
+# that they disagree, and nothing more than that — naming them was asking for
+# the leak it produced: told not to mention sources while being handed
+# "《股癌》Podcast 逐字稿分析" and "X 分析師社群彙總", it wrote theses like
+# "X社群單一貼文指其調漲報價…而逐字稿分析多持保留態度". A reader of the
+# merged row is owed a judgement about the company, not about who said what.
+_LABELS = {SOURCE_GOOAYE: "觀點A", SOURCE_X: "觀點B"}
 
 # app/services/xstock_push.py stamps its rows with ［股癌 Gooaye · US · 提及 3 集］
 # so they stay identifiable in X Stock Tracker's own dashboard. The merged row
 # is a view of the company rather than of a tracker, so that header is stripped
 # both from what the model sees and from the mechanical fallback text.
 _PROVENANCE = re.compile(r"^［股癌 Gooaye[^］]*］\s*")
+
+# Words that mean the fusion described who said something rather than what is
+# true of the company. The prompt forbids them; this is how anyone finds out
+# when the model ignored it, which is not visible by reading the row — it is
+# fluent, plausible prose either way.
+_SOURCE_LEAK = re.compile(
+    r"觀點[AB]|股癌|Podcast|逐字稿|社群|貼文|分析師|X\s*上的", re.IGNORECASE)
+
+
+def source_leak(thesis: str) -> str:
+    """The first source-naming phrase in a fused thesis, or ''."""
+    match = _SOURCE_LEAK.search(thesis or "")
+    return match.group(0) if match else ""
 
 _SELECT = text(f"""
     SELECT source, upper(btrim(symbol)) AS symbol, company_name, stance, confidence,
@@ -505,6 +521,13 @@ async def _synthesize(
         for symbol, item in results.items():
             if symbol not in rows or not item["thesis"]:
                 continue  # an empty answer is worse than the mechanical text
+            leak = source_leak(item["thesis"])
+            if leak:
+                # Kept rather than discarded: the fusion is still the better
+                # text, and throwing it away would cost another call to get
+                # something no more likely to comply. Logged so it is findable.
+                logger.warning("融合論點提及了來源，違反 prompt 規則 | symbol=%s | 出現=%r",
+                               symbol, leak)
             rows[symbol].update({
                 "stance": item["stance"][:16],
                 "thesis": item["thesis"][:1200],
