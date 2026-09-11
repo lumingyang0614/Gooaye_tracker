@@ -501,6 +501,98 @@ async def analyze_companies(blocks: dict[str, str], *, max_tokens: int = 8192) -
     return results
 
 
+MERGED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "companies": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "stance": {"type": "string", "enum": ["bullish", "bearish", "neutral", "mixed"]},
+                    "thesis": {"type": "string"},
+                    "strengths": {"type": "array", "items": {"type": "string"}},
+                    "weaknesses": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["symbol", "stance", "thesis", "strengths", "weaknesses"],
+            },
+        }
+    },
+    "required": ["companies"],
+}
+
+# The point of this pass is integration, not juxtaposition: the caller already
+# has both sides' text and could have pasted them together itself. What it
+# cannot do mechanically is decide what the two views jointly imply — where
+# they reinforce each other, where they genuinely conflict, and which variable
+# actually matters. Hence the explicit ban on per-source bullet lists.
+MERGED_INSTRUCTIONS = """你是股票研究資料整理員。每個 SYMBOL 區塊會給你同一家公司的兩份既有觀點：
+一份來自《股癌》Podcast 的逐字稿分析，一份來自 X 上的分析師社群彙總。
+
+請把它們**融合成一份觀點**，不是並列兩份：
+- thesis：用繁體中文寫出整合後的核心論點，最多 300 字。要寫出這家公司目前的關鍵變數與判斷依據。
+  兩邊講到同一件事時合併成一句，不要重複；兩邊有分歧時，直接在論點裡說明分歧在哪、各自的理由是什麼。
+  **嚴禁**寫成「股癌認為…；X 分析師認為…」這種分段並列，也不要提及個別分析師或來源名稱。
+- stance：整合後的整體立場，只能是 bullish／bearish／neutral／mixed。
+  兩邊方向一致就用該方向；方向相反且都有實質理由時用 mixed；證據薄弱或中性時用 neutral。
+- strengths：整合後的正面理由，最多 5 點，每點最多 60 字。兩邊重複的合併成一點。
+- weaknesses：整合後的風險與疑慮，最多 5 點，每點最多 60 字。兩邊重複的合併成一點。
+
+輸入的兩份觀點都已經是彙總結果，直接當成兩份既有判斷來整合即可，不需要再自行加權任何來源。
+嚴禁虛構財務數字、產品、時間點或未在輸入中出現的事實；某一面向沒有依據就給空陣列，不要硬湊。
+欄位名稱必須完全遵守指定 schema，不要輸出分析過程或 Markdown。"""
+
+
+def _normalize_merged(item: dict[str, Any], max_points: int = 5) -> dict[str, Any]:
+    stance = str(item.get("stance") or "").strip().lower()
+    return {
+        "symbol": str(item.get("symbol") or "").strip().upper(),
+        "stance": stance if stance in {"bullish", "bearish", "neutral", "mixed"} else "neutral",
+        "thesis": str(item.get("thesis") or "").strip(),
+        "strengths": [point[:120] for point in _string_list(item.get("strengths"))][:max_points],
+        "weaknesses": [point[:120] for point in _string_list(item.get("weaknesses"))][:max_points],
+    }
+
+
+async def synthesize_merged_views(blocks: dict[str, str], *, max_tokens: int = 8192) -> dict[str, dict[str, Any]]:
+    """Fuse each company's two source views into one, for a batch of companies.
+
+    Same contract as analyze_companies: `blocks` maps canonical symbol -> the
+    evidence text, and only the companies the model actually answered for come
+    back. A company left out keeps whatever the caller already had rather than
+    being shown as blank.
+    """
+    if not blocks:
+        return {}
+    separator = "\n\n---\n\n"
+    prompt = (
+        f"{MERGED_INSTRUCTIONS}\n\n每個 SYMBOL 都必須回傳一筆結果。\n\n"
+        '最外層格式必須是 {"companies":[{"symbol":"代號","stance":"bullish","thesis":"論點","strengths":[],"weaknesses":[]}]}。\n'
+        + separator.join(f"SYMBOL: {symbol}\n{evidence}" for symbol, evidence in blocks.items())
+    )
+    parsed = await chat_json(
+        [
+            {"role": "system", "content": "Return valid JSON matching the schema and one result for every SYMBOL."},
+            {"role": "user", "content": prompt},
+        ],
+        MERGED_SCHEMA,
+        max_tokens=max_tokens,
+        timeout=max(get_settings().llm_timeout_seconds, 300),
+    )
+    _validate_schema(parsed, MERGED_SCHEMA)
+    results: dict[str, dict[str, Any]] = {}
+    for raw in parsed.get("companies") or []:
+        if not isinstance(raw, dict):
+            continue
+        item = _normalize_merged(raw)
+        if item["symbol"] in blocks:
+            results[item["symbol"]] = item
+    if not results:
+        raise ValueError("LLM returned no requested companies")
+    return results
+
+
 async def llm_health() -> bool:
     settings = get_settings()
     provider = settings.llm_provider.strip().lower()

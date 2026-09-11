@@ -78,7 +78,10 @@ def test_same_symbol_can_exist_once_per_source(connection):
     rows = dict(connection.execute(text(
         f"SELECT source, stance FROM {TABLE} WHERE symbol = :symbol"
     ), {"symbol": existing}).all())
-    assert set(rows) == {"x", SOURCE_GOOAYE}
+    # A superset check, not equality: a third source ('merged', written by
+    # app/services/merged_views.py) may also hold this symbol, and that is
+    # exactly the coexistence this test is about.
+    assert {"x", SOURCE_GOOAYE} <= set(rows)
     assert rows[SOURCE_GOOAYE] == "bearish"
 
 

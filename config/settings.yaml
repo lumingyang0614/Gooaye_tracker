@@ -66,6 +66,13 @@ analysis:
 # 寫入 x_company_views（其餘資料表維持唯讀／無權限）。
 xstocktracker:
   push_company_insights: true
+  # 合併觀點：把「股癌的看法」與「X 分析師社群的看法」用 LLM 融合成一份，
+  # 以 source='merged' 寫回 x_company_views，給下游（LINE bot /觀點）讀取。
+  # 只有兩邊都收錄的公司才會呼叫 LLM；只有單一來源的公司直接機械沿用，不花錢。
+  merge_llm_enabled: true
+  merge_batch_size: 2
+  merge_pause_seconds: 2.0
+  merge_max_tokens: 8192
 
 schedules:
   # 背景排程：不用手動打 API，服務啟動後就定期同步新集數並更新公司觀點。

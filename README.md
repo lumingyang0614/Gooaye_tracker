@@ -239,6 +239,52 @@ POST /api/xstocktracker/push                  # 全量推送（並清掉已失�
 POST /api/xstocktracker/push?symbols=2330.TW  # 只推特定幾家
 ```
 
+### 給下游讀取端的融合觀點
+
+`x_company_views` 刻意一個來源一列，所以**同一家公司會有兩列**（`source='x'` 與 `source='gooaye'`）。儀表板沒問題——卡片上有來源標籤；但「用公司名查詢、把每一筆都顯示出來」的下游就會看到重複，例如 LINE bot 的 `/觀點 MU` 會回兩張卡。
+
+把兩段文字貼在一起並不算解法，那只是把整合的工作丟給讀的人。所以這裡用 **LLM 把兩邊融合成一份觀點**，以 `source='merged'` 寫回同一張表：
+
+```powershell
+python -m scripts.create_unified_view --dsn "postgresql://postgres:密碼@localhost:5432/xstocktracker"   # 一次性
+python -m scripts.rebuild_merged_views
+```
+
+`rebuild_merged_views` 會：
+
+- 讀出每家公司在兩邊的既有觀點（立場、論點、優劣勢、出處）
+- **只有兩邊都收錄的公司**才呼叫 LLM 融合；只有單一來源的公司直接機械沿用，不花錢
+- 寫回 `source='merged'` 一列，`mention_count` 相加、出處連結聯集
+
+融合後的 `thesis` 是一份整合論點，**不會**寫成「股癌認為…；X 分析師認為…」，prompt 明確禁止分段並列與提及來源名稱。兩邊方向相反時 `stance` 會是 `mixed`，並在論點裡說明分歧在哪。
+
+**不做來源加權。** 兩份輸入都已經是彙總結果——X Stock Tracker 建自己那列時已經套用了 Serenity playbook 的權重加分（`analysis.priority_weight`），Gooaye 建自己那列時已依片段重要度加權。在這裡再加權一次等於把兩邊已經做過的判斷重複計算，所以兩份都當成「一份既有判斷」交給模型整合。
+
+實際輸出（MU，兩邊都有）：
+
+> 美光的核心變數在於 AI 需求帶動的記憶體（尤其 HBM）成長動能⋯⋯技術面上，股價正放量突破小型底部樞軸，近期多次出現需求放量，與基本面利多相互印證。
+
+前半來自股癌的 AI／HBM 討論，後半來自 X 的量價訊號，融合成一句判斷而不是兩段引述。
+
+### 讀取端怎麼接
+
+`scripts.create_unified_view` 建立唯讀 view `public.company_views_unified`，一家公司一列，優先取 `merged`；還沒融合到的公司暫時沿用單一來源，所以不會有空窗。欄位名稱沿用原表，下游是**改設定不用改程式**。LINE bot 的 `.env` 改一行：
+
+```dotenv
+XSTOCKTRACKER_COMPANY_VIEWS_TABLE=public.company_views_unified
+```
+
+實測（直接呼叫 LINE bot 未修改的 `fetch_company_views("MU")`）：
+
+```
+指向 x_company_views        -> 3 筆（x／gooaye／merged 各一）
+指向 company_views_unified  -> 1 筆（融合後的觀點，提及 2）
+```
+
+建立 view 需要 schema 的 CREATE 權限，推送用的帳號刻意沒有，所以用有權限的帳號跑 `--dsn`，或 `--print-sql` 印出 SQL 交給管理員。可重複執行。
+
+平常不用手動跑：同步流程跑完推送後，會自動只針對「這次有變動的公司」重新融合（`config/settings.yaml` 的 `xstocktracker.merge_llm_enabled` 可關閉）。
+
 ## 測試
 
 ```powershell

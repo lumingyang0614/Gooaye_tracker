@@ -21,6 +21,9 @@
    source='gooaye' (app/services/xstock_push.py), so both projects' views of
    a company sit side by side on that project's dashboard. Optional and
    non-fatal: it is skipped when unconfigured and never fails the sync run.
+7. Re-fuse those companies' `merged` rows (app/services/merged_views.py), so
+   consumers reading one view per company — the LINE bot's /觀點 — see an
+   opinion built from the evidence this run just changed.
 """
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ from app.services.chunking import split_transcript
 from app.services.company_insights import rebuild_company_insights
 from app.services.entity_resolver import canonicalize_symbols
 from app.services.llm import analyze_chunks, paced
+from app.services.merged_views import rebuild_merged_views
 from app.services.xstock_push import push_company_insights
 
 logger = logging.getLogger("uvicorn.error")
@@ -171,9 +175,14 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
         # only after the local rebuild has committed, and never allowed to
         # fail the run — see app/services/xstock_push.py.
         xstock_result: dict[str, Any] = {"skipped": "no affected symbols"}
+        merged_result: dict[str, Any] = {"skipped": "no affected symbols"}
         if affected_symbols:
             insights_result = await rebuild_company_insights(selected_symbols=sorted(affected_symbols), use_llm=True)
             xstock_result = push_company_insights(selected_symbols=sorted(affected_symbols))
+            # Re-fuse only the companies this run touched: the merged row is
+            # derived from the pushed one, so leaving it alone would serve
+            # consumers a view of evidence that has already changed.
+            merged_result = await rebuild_merged_views(selected_symbols=sorted(affected_symbols))
 
         return {
             "pack_episodes": len(pack_episodes),
@@ -186,6 +195,7 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
             "affected_symbols": sorted(affected_symbols),
             "company_insights": insights_result,
             "xstocktracker_push": xstock_result,
+            "merged_views": merged_result,
         }
 
 
