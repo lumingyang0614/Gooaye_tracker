@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import sys
 
 from app.services.merged_views import rebuild_merged_views
 
@@ -37,8 +39,22 @@ async def main() -> None:
     parser.add_argument("--force", action="store_true", help="連沒變動的公司也重做")
     args = parser.parse_args()
 
-    result = await rebuild_merged_views(
-        selected_symbols=args.symbols, use_llm=not args.no_llm, force=args.force)
+    # The standalone CLI does not inherit uvicorn's logging configuration.
+    # StreamHandler flushes each record, including when output is redirected.
+    progress_logger = logging.getLogger("uvicorn.error")
+    previous_level = progress_logger.level
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
+    progress_logger.addHandler(handler)
+    progress_logger.setLevel(logging.INFO)
+
+    try:
+        result = await rebuild_merged_views(
+            selected_symbols=args.symbols, use_llm=not args.no_llm, force=args.force)
+    finally:
+        progress_logger.removeHandler(handler)
+        progress_logger.setLevel(previous_level)
+        handler.close()
     if result.get("skipped"):
         print(f"已略過：{result['skipped']}")
         return

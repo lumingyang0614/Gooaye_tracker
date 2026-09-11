@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -358,6 +359,7 @@ async def rebuild_merged_views(
         if not wanted:
             return _skip("no symbols requested")
 
+    logger.info("合併觀點開始：讀取來源與既有融合資料…")
     try:
         # Inside the guard, not before it: building the engine parses the DSN
         # and can raise on its own for a malformed XSTOCKTRACKER_DB_URL, which
@@ -401,14 +403,19 @@ async def rebuild_merged_views(
 
     # Only companies both trackers actually cover need fusing.
     two_sided = sorted(symbol for symbol, sources in pending.items() if len(sources) > 1)
+    logger.info("待更新 %d 家；未變動跳過 %d 家；單一來源 %d 家；待清理 %d 家",
+                len(pending), unchanged, len(pending) - len(two_sided), len(doomed))
     fused, failures = set(), []
     if want_fusion and two_sided:
         fused, failures = await _synthesize(two_sided, pending, rows, config)
+    else:
+        logger.info("本輪不呼叫融合模型：%s", "沒有待融合的雙來源公司" if not two_sided else "LLM 已停用")
     # A single-source company has nothing to fuse, so its mechanical row is
     # already everything it can be; only two-sided rows can be owed an upgrade.
     fused |= {symbol for symbol, sources in pending.items() if len(sources) < 2}
 
     try:
+        logger.info("開始寫入資料庫：%d 家，清理失效列 %d 家…", len(rows), len(doomed))
         with engine.begin() as connection:
             if rows:
                 connection.execute(_UPSERT, list(rows.values()))
@@ -418,6 +425,7 @@ async def rebuild_merged_views(
         logger.warning("合併觀點寫入失敗 | error=%s: %s", type(exc).__name__, exc)
         return _skip(f"寫入 {TABLE} 失敗：{type(exc).__name__}", error=type(exc).__name__)
 
+    logger.info("融合資料已提交：%d 家；開始記錄本地融合狀態…", len(rows))
     # Only after the shared table actually committed: recording a fusion that
     # was never published would skip it on the next pass too.
     # On a full pass `live` is authoritative, so records for companies that are
@@ -457,15 +465,31 @@ async def _synthesize(
     max_tokens = max(2048, int(config.get("merge_max_tokens", 8192)))
 
     completed, failures = set(), []
+    total_batches = (len(symbols) + batch_size - 1) // batch_size
+    overall_started = time.monotonic()
+    logger.info("待融合 %d 家，共 %d 批；批次間隔 %.1f 秒（模型重試另計）",
+                len(symbols), total_batches, pause_seconds)
+
+    def report_batch(start: int, batch: list[str], started: float, success: int) -> None:
+        processed = min(start + len(batch), len(symbols))
+        logger.info(
+            "[%d/%d] 本批結束：成功 %d、未融合 %d；已處理 %d/%d 家，累計成功 %d 家；本批 %.1f 秒，累計 %.1f 秒（尚未寫入資料庫）",
+            start // batch_size + 1, total_batches, success, len(batch) - success,
+            processed, len(symbols), len(completed), time.monotonic() - started,
+            time.monotonic() - overall_started)
+
     starts = range(0, len(symbols), batch_size)
     async for start in paced(starts, pause_seconds):
         batch = symbols[start:start + batch_size]
+        batch_started = time.monotonic()
+        logger.info("[%d/%d] 開始：%s", start // batch_size + 1, total_batches, "、".join(batch))
         blocks = {}
         for symbol in batch:
             evidence, _ = _combined_evidence(grouped[symbol])
             if evidence:
                 blocks[symbol] = f"COMPANY: {rows[symbol]['company_name']}\n{evidence}"
         if not blocks:
+            report_batch(start, batch, batch_started, 0)
             continue
         try:
             results = await synthesize_merged_views(blocks, max_tokens=max_tokens)
@@ -475,6 +499,7 @@ async def _synthesize(
             failures.append({"symbols": list(blocks), "error": type(exc).__name__})
             logger.warning("合併觀點分析失敗，保留機械彙整 | symbols=%s | error=%s: %s",
                            ",".join(batch), type(exc).__name__, exc)
+            report_batch(start, batch, batch_started, 0)
             continue
         applied = set()
         for symbol, item in results.items():
@@ -494,4 +519,6 @@ async def _synthesize(
         missing = sorted(set(blocks) - applied)
         if missing:
             failures.append({"symbols": missing, "error": "MissingCompanyResults"})
+            logger.warning("本批未融合，保留機械彙整：%s", "、".join(missing))
+        report_batch(start, batch, batch_started, len(applied))
     return completed, failures
