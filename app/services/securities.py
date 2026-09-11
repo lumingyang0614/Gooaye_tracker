@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import create_engine, text
 
 from app.config import get_settings
+from app.services.company_names import index_alias
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -92,9 +93,7 @@ def load_security_lookup() -> dict[str, dict[str, str]]:
                     for key in ("code", "provider_symbol", "company_name", "english_name" if has_english_name else None):
                         if not key:
                             continue
-                        value = data.get(key)
-                        if value and str(value).strip():
-                            candidates.setdefault(str(value).strip().casefold(), set()).add(symbol)
+                        index_alias(candidates, data.get(key), symbol)
 
         lookup: dict[str, dict[str, str]] = dict(canonical_entries)
         ambiguous = 0

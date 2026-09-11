@@ -25,6 +25,7 @@ from sqlalchemy import select, update
 
 from app.db import SessionLocal, init_db
 from app.models import TaiwanSecurity
+from app.services.company_names import index_alias
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -154,8 +155,7 @@ def _lookup_from_rows(rows: list[TaiwanSecurity]) -> dict[str, dict[str, str]]:
         }
         entries[row.canonical_symbol.casefold()] = item
         for alias in (row.code, row.provider_symbol, row.company_name, row.english_name):
-            if alias and str(alias).strip():
-                candidates.setdefault(str(alias).strip().casefold(), set()).add(row.canonical_symbol)
+            index_alias(candidates, alias, row.canonical_symbol)
 
     lookup = dict(entries)
     for alias, symbols in candidates.items():

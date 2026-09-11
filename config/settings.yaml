@@ -111,3 +111,16 @@ company_aliases:
   - {symbol: GOOGL, company_name: Alphabet, aliases: [ALPHABET, GOOGLE, GOOGL]}
   - {symbol: "005930.KS", company_name: Samsung Electronics, aliases: [SAMSUNG, 三星, "005930"]}
   - {symbol: "000660.KS", company_name: SK hynix, aliases: [SKHYNIX, "SK HYNIX", "000660"]}
+  # 主檔對不上的別名。日股主檔存的是日文原名（村田製作所、ローム），美股主檔存的是
+  # registered name（Palantir Technologies Inc.），股癌講的是簡稱或中文譯名，兩邊
+  # 永遠碰不到。沒有這幾行的話，同一家公司會在公司觀點裡出現兩列（例如 村田 與
+  # 村田制作所、ROHM 與 羅姆），提及次數與證據被拆成一半。
+  - {symbol: PLTR, company_name: Palantir, aliases: [PALANTIR, "PALANTIR TECHNOLOGIES", PLTR]}
+  - {symbol: TXN, company_name: Texas Instruments, aliases: ["TEXAS INSTRUMENTS", 德州儀器, 德州仪器, TXN]}
+  # symbol 必須加引號：YAML 1.1 會把裸寫的 ON/OFF/YES/NO/Y/N 當成布林值，
+  # `symbol: ON` 會變成 True，公司代號就成了 "TRUE"。
+  - {symbol: "ON", company_name: onsemi, aliases: [ONSEMI, "ON SEMICONDUCTOR", 安森美]}
+  - {symbol: "6981.T", company_name: 村田製作所, aliases: [MURATA, 村田, 村田製作所, 村田制作所]}
+  - {symbol: "6963.T", company_name: ROHM, aliases: [ROHM, 羅姆, 罗姆, ローム]}
+  - {symbol: "6752.T", company_name: Panasonic, aliases: [PANASONIC, 松下, パナソニック]}
+  - {symbol: "6762.T", company_name: TDK, aliases: [TDK]}

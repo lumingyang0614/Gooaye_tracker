@@ -31,6 +31,7 @@ from __future__ import annotations
 import re
 
 from app.runtime_config import load_runtime_config
+from app.services.company_names import fuzzy_key
 from app.services.securities import load_security_lookup
 from app.services.taiwan_securities import load_taiwan_security_lookup
 
@@ -117,6 +118,14 @@ def _resolve_one(
     external = external_lookup.get(cleaned.casefold())
     if external:
         return external["symbol"].upper()
+    # The masters store registered names ("Tesla, Inc."); 股癌 says "Tesla".
+    # Both sides go through the same normalization so the short spoken name
+    # finds the listing instead of becoming a company of its own.
+    key = fuzzy_key(cleaned)
+    if key:
+        fuzzy = taiwan_lookup.get(key) or external_lookup.get(key)
+        if fuzzy:
+            return fuzzy["symbol"].upper()
 
     for token in _TOKEN_SPLIT_RE.split(cleaned):
         if not token:
