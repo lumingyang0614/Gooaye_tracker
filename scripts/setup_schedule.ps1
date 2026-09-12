@@ -1,6 +1,15 @@
-# Registers a Windows Task Scheduler task that runs Gooaye Tracker's sync
-# script periodically, since this project (unlike Serenity Stock Tracker) has
-# no built-in background scheduler process of its own.
+# Registers a Windows Task Scheduler task that fires one Gooaye Tracker sync
+# pass at a time.
+#
+# This predates the project having a scheduler of its own, and that comment is
+# no longer true: app/services/background_updates.py now runs three loops
+# (episode_sync, taiwan_securities, merge_refresh) inside the API process.
+# Prefer scripts\setup_service.ps1, which keeps that process resident — it also
+# covers merge_refresh, which this path never runs, so merged company views go
+# stale whenever X Stock Tracker updates its own rows.
+#
+# Use this one only when you specifically do not want a long-running process.
+# Do not run both: they would analyze the same episodes at overlapping times.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\setup_schedule.ps1
