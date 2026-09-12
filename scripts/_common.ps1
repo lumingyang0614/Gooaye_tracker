@@ -27,13 +27,30 @@ function Get-ProjectPython {
 
     if ($PythonExe) { return $PythonExe }
 
-    # Any virtualenv directly inside the project, most recently created first,
-    # so a freshly rebuilt environment wins over an abandoned one.
+    # An activated virtualenv states exactly where it is. This is the only
+    # source that is right by construction rather than by search, so it wins —
+    # and setup_service.ps1 is normally run from an activated shell, which is
+    # what lets it record an absolute path instead of leaving the scheduled
+    # task to guess later with none of that context.
+    if ($env:VIRTUAL_ENV) {
+        $active = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
+        if (Test-Path $active) { return $active }
+    }
+
+    # Then any virtualenv inside the project *or beside it*. A checkout at
+    # E:\Gooaye_tracker\Gooaye_tracker keeps its venv one level up in
+    # E:\Gooaye_tracker; searching only inside found nothing, so the task fell
+    # back to a bare "python" that SYSTEM's PATH does not even contain.
+    $roots = @($ProjectRoot)
+    $parent = Split-Path -Parent $ProjectRoot
+    if ($parent) { $roots += $parent }
+
     # @() matters: a pipeline yielding one item returns a string, not an array,
     # and $found[0] on a string is its first character — which produced the
     # interpreter path "F" from "F:\Gooaye\venv_Gooaye\Scripts\python.exe".
     $found = @(
-        Get-ChildItem -Path $ProjectRoot -Directory -ErrorAction SilentlyContinue |
+        $roots |
+            ForEach-Object { Get-ChildItem -Path $_ -Directory -ErrorAction SilentlyContinue } |
             ForEach-Object { Join-Path $_.FullName "Scripts\python.exe" } |
             Where-Object { Test-Path $_ } |
             Sort-Object { (Get-Item $_).LastWriteTime } -Descending

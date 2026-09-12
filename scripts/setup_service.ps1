@@ -18,7 +18,8 @@
 param(
     [int]$Port = 8100,
     [string]$BindHost = "127.0.0.1",
-    [string]$TaskName = "GooayeTrackerService"
+    [string]$TaskName = "GooayeTrackerService",
+    [string]$PythonExe = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,7 +44,31 @@ if ($BindHost -ne "127.0.0.1") {
         "or behind a reverse proxy that adds one.")
 }
 
-$ActionArg = '-NoProfile -ExecutionPolicy Bypass -File "' + $RunScript + '" -Port ' + $Port + ' -BindHost ' + $BindHost
+# Resolve the interpreter here, not inside the task. This shell has an
+# activated virtualenv and a user PATH; the task runs as SYSTEM with neither,
+# so anything left to be worked out later is worked out with less information.
+# Leaving it to the task produced exactly that: a log line reading
+# "starting uvicorn ... using python" and an exit code 1, because SYSTEM's PATH
+# has no python at all.
+. (Join-Path $PSScriptRoot "_common.ps1")
+$ResolvedPython = Get-ProjectPython -ProjectRoot $ProjectRoot -PythonExe $PythonExe
+if ($ResolvedPython -eq "python") {
+    Write-Error ("Could not find this project's virtualenv near " + $ProjectRoot + ". " +
+        "Activate it before running this, or pass the full path: " +
+        "-PythonExe C:\path\to\venv\Scripts\python.exe")
+    exit 1
+}
+
+# Validated now, while a person is watching. The same check runs again at boot,
+# but a failure there is only discoverable by reading a log afterwards.
+$probeLog = Join-Path ([System.IO.Path]::GetTempPath()) ("gooaye_setup_probe_" + [guid]::NewGuid().ToString("N") + ".log")
+if (-not (Assert-ProjectPython -PythonExe $ResolvedPython -ProjectRoot $ProjectRoot -LogFile $probeLog)) {
+    Write-Error "The interpreter above cannot run this project, so the service would fail at boot. Nothing was registered."
+    exit 1
+}
+Write-Output ("Using interpreter: " + $ResolvedPython)
+
+$ActionArg = '-NoProfile -ExecutionPolicy Bypass -File "' + $RunScript + '" -Port ' + $Port + ' -BindHost ' + $BindHost + ' -PythonExe "' + $ResolvedPython + '"'
 
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $ActionArg -WorkingDirectory $ProjectRoot
 
