@@ -184,5 +184,40 @@ def test_public_is_not_quoted_as_if_it_were_a_role_name():
 
 
 def test_roles_are_not_granted_twice():
-    granted = [s for s in statements(["gooaye", "Gooaye", " gooaye "]) if s.startswith("GRANT")]
+    """Same role, written with stray whitespace. Case is *not* included here:
+    PostgreSQL quoted identifiers are case-sensitive, so "Gooaye" is a
+    different role — see test_role_names_differing_only_in_case_are_kept_apart."""
+    granted = [s for s in statements(["gooaye", " gooaye ", "gooaye"]) if s.startswith("GRANT")]
     assert len(granted) == 1
+
+
+# --- grant targets are identifiers, not string interpolation -----------------
+
+def test_role_names_differing_only_in_case_are_kept_apart():
+    """A quoted identifier is case-sensitive in PostgreSQL, so "Reader" and
+    "reader" are two different roles; folding them together drops a grant."""
+    granted = [s for s in statements(["Reader", "reader"]) if s.startswith("GRANT")]
+    assert len(granted) == 2
+    assert any('"Reader"' in s for s in granted) and any('"reader"' in s for s in granted)
+
+
+def test_public_is_still_deduplicated_regardless_of_case():
+    """PUBLIC is a keyword rather than a name, so case carries no meaning."""
+    granted = [s for s in statements(["PUBLIC", "public", "Public"]) if s.startswith("GRANT")]
+    assert granted == [f"GRANT SELECT ON {VIEW_NAME} TO PUBLIC"]
+
+
+def test_a_double_quote_in_a_role_name_is_escaped():
+    """Otherwise the name closes its own quoting and the remainder is SQL."""
+    granted = next(s for s in statements(['we"ird']) if s.startswith("GRANT"))
+    assert granted.endswith('"we""ird"')
+
+
+def test_printable_sql_is_wrapped_in_a_transaction():
+    """The script drops the view first. A paste that fails partway through —
+    a typo'd role, a refused GRANT — must not leave consumers with no view."""
+    sql = full_sql(["gooaye"])
+    assert sql.startswith("BEGIN;")
+    assert sql.rstrip().endswith("COMMIT;")
+    assert sql.index("DROP VIEW") > sql.index("BEGIN;")
+    assert sql.index("COMMIT;") > sql.index("GRANT")

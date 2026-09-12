@@ -45,9 +45,17 @@ ORDER BY upper(btrim(symbol)),
 
 
 def _grantee(role: str) -> str:
-    """PUBLIC is a keyword, not a role name — quoting it grants to nobody."""
+    """Render one role as a GRANT target.
+
+    PUBLIC is a keyword, not a role name — quoting it grants to nobody. Every
+    other name is a quoted identifier, and a quoted identifier escapes an
+    embedded double quote by doubling it. Without that, a role name containing
+    one closes the quoting early and the rest of the name becomes SQL.
+    """
     name = role.strip()
-    return "PUBLIC" if name.upper() == "PUBLIC" else f'"{name}"'
+    if name.upper() == "PUBLIC":
+        return "PUBLIC"
+    return '"{}"'.format(name.replace('"', '""'))
 
 
 def statements(reader_roles: list[str]) -> list[str]:
@@ -71,14 +79,29 @@ def statements(reader_roles: list[str]) -> list[str]:
         "DROP FUNCTION IF EXISTS public.gooaye_json_array(text)",
         _VIEW_SQL.strip(),
     ]
+    # Case-sensitively: a quoted identifier is case-sensitive in PostgreSQL, so
+    # "Reader" and "reader" are two different roles and folding them together
+    # silently drops a grant. Only PUBLIC is matched case-insensitively, because
+    # there it is a keyword rather than a name.
     seen = set()
     for role in reader_roles:
-        if role and role.strip() and role.strip().lower() not in seen:
-            seen.add(role.strip().lower())
+        if not role or not role.strip():
+            continue
+        key = "PUBLIC" if role.strip().upper() == "PUBLIC" else role.strip()
+        if key not in seen:
+            seen.add(key)
             sql.append(f"GRANT SELECT ON {VIEW_NAME} TO {_grantee(role)}")
     return sql
 
 
 def full_sql(reader_roles: list[str]) -> str:
-    """The same statements as one pasteable script for psql."""
-    return ";\n\n".join(statements(reader_roles)) + ";\n"
+    """The same statements as one pasteable script for psql.
+
+    Wrapped in a transaction, because the first statement drops the view: a
+    paste that fails halfway — a typo'd role, a permissions error on the GRANT
+    — would otherwise leave consumers with no view at all until someone
+    noticed. scripts/create_unified_view.py gets this from engine.begin(); a
+    human running the printed SQL deserves the same protection.
+    """
+    body = ";\n\n".join(statements(reader_roles))
+    return f"BEGIN;\n\n{body};\n\nCOMMIT;\n"
