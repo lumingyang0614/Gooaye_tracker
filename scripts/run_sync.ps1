@@ -11,6 +11,7 @@ $LogFile = Join-Path $LogDir "sync.log"
 
 . (Join-Path $PSScriptRoot "_common.ps1")
 $PythonExe = Get-ProjectPython -ProjectRoot $ProjectRoot
+if (-not (Assert-ProjectPython -PythonExe $PythonExe -ProjectRoot $ProjectRoot -LogFile $LogFile)) { exit 1 }
 
 $startedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 Add-Content -Path $LogFile -Value ("`n[" + $startedAt + "] sync_gooaye started")

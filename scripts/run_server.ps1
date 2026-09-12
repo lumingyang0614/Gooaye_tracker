@@ -13,7 +13,8 @@
 
 param(
     [int]$Port = 8100,
-    [string]$BindHost = "127.0.0.1"
+    [string]$BindHost = "127.0.0.1",
+    [string]$PythonExe = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,7 +22,7 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
 
 . (Join-Path $PSScriptRoot "_common.ps1")
-$PythonExe = Get-ProjectPython -ProjectRoot $ProjectRoot
+$PythonExe = Get-ProjectPython -ProjectRoot $ProjectRoot -PythonExe $PythonExe
 
 $LogDir = Join-Path $ProjectRoot "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -29,6 +30,8 @@ $LogFile = Join-Path $LogDir "server.log"
 
 $startedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 Add-Content -Path $LogFile -Value ("`n[" + $startedAt + "] starting uvicorn on " + $BindHost + ":" + $Port + " using " + $PythonExe)
+
+if (-not (Assert-ProjectPython -PythonExe $PythonExe -ProjectRoot $ProjectRoot -LogFile $LogFile)) { exit 1 }
 
 # Redirection is handed to cmd.exe rather than written as PowerShell's `*>>`.
 # uvicorn logs to stderr, and Windows PowerShell wraps each stderr line from a
