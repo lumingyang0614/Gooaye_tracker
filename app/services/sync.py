@@ -178,11 +178,12 @@ async def sync_gooaye(limit: int | None = None) -> dict[str, Any]:
         merged_result: dict[str, Any] = {"skipped": "no affected symbols"}
         if affected_symbols:
             insights_result = await rebuild_company_insights(selected_symbols=sorted(affected_symbols), use_llm=True)
-            xstock_result = push_company_insights(selected_symbols=sorted(affected_symbols))
+            rebuilt_symbols = insights_result.get("symbols", sorted(affected_symbols))
+            xstock_result = push_company_insights(selected_symbols=rebuilt_symbols)
             # Re-fuse only the companies this run touched: the merged row is
             # derived from the pushed one, so leaving it alone would serve
             # consumers a view of evidence that has already changed.
-            merged_result = await rebuild_merged_views(selected_symbols=sorted(affected_symbols))
+            merged_result = await rebuild_merged_views(selected_symbols=rebuilt_symbols)
 
         return {
             "pack_episodes": len(pack_episodes),

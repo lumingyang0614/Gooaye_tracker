@@ -188,6 +188,7 @@ class BackgroundUpdates:
             result = await sync_gooaye(limit=limit)
             if not result.get("affected_symbols"):
                 logger.info("本次沒有新的公司觀點 | 改為重試 xstocktracker 推送以補齊先前失敗的更新")
+                result["company_insights"] = await rebuild_company_insights(use_llm=True)
                 result["xstocktracker_push"] = push_company_insights()
             return result
 

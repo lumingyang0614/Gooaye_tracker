@@ -441,6 +441,7 @@ COMPANY_SCHEMA: dict[str, Any] = {
 # turning scattered spoken-word summaries into a readable argument.
 COMPANY_INSTRUCTIONS = """你是台股市場研究資料整理員。以下每個 SYMBOL 區塊列出《股癌》Podcast 中談到該公司的逐字稿片段摘要。
 請逐家公司整理主持人對這家公司的看法：
+- 同一家公司的跨集內容必須融合成一份公司級判斷；片段同時提及其他公司時，只取與目標公司直接相關的理由，不可把其他公司的業務、利多或風險移植過來。不同時期看法有變化時交代變化，不要逐集貼上摘要。
 - thesis：用繁體中文寫出核心論點，最多 300 字。必須是對這家公司的具體判斷（在意什麼、關鍵變數是什麼），不可只是把片段摘要抄一遍或流水帳。
 - strengths：主持人提到的正面理由，最多 5 點，每點最多 60 字。
 - weaknesses：主持人提到的風險、疑慮或看壞的理由，最多 5 點，每點最多 60 字。

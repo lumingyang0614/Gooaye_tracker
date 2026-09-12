@@ -11,6 +11,7 @@ from app.services.background_updates import background_updates
 from app.services.company_insights import list_symbol_segments, rebuild_company_insights
 from app.services.dashboard import build_dashboard, episodes_page
 from app.services.llm import llm_health
+from app.services.merged_views import rebuild_merged_views
 from app.services.sync import sync_gooaye
 from app.services.taiwan_securities import sync_taiwan_securities
 from app.services.xstock_push import is_enabled as xstock_push_enabled, push_company_insights
@@ -95,8 +96,8 @@ async def sync_tw_securities():
 
 
 @app.post("/api/xstocktracker/push")
-def push_to_xstocktracker(symbols: str | None = None):
-    """把 Gooaye 的公司觀點寫進 X Stock Tracker 的 x_company_views（source='gooaye'）。
+async def push_to_xstocktracker(symbols: str | None = None):
+    """先整合 Gooaye 的公司觀點，再匯入 X Stock Tracker 並更新下游融合觀點。
 
     不帶 symbols 就是全量推送：Gooaye 目前有的公司全部寫入，並刪掉那邊已經不該
     存在的 source='gooaye' 列。平常同步流程會自動增量推送，這個端點是給改完設定
@@ -107,7 +108,14 @@ def push_to_xstocktracker(symbols: str | None = None):
     selected = [value.strip() for value in symbols.split(",") if value.strip()] if symbols else None
     if symbols is not None and not selected:
         raise HTTPException(400, "symbols must contain at least one symbol")
-    return push_company_insights(selected_symbols=selected)
+    analysis = await rebuild_company_insights(selected_symbols=selected, use_llm=True)
+    if selected is not None:
+        selected = analysis["symbols"]
+    result = push_company_insights(selected_symbols=selected)
+    result["company_insights"] = analysis
+    if not result.get("error") and not result.get("skipped"):
+        result["merged_views"] = await rebuild_merged_views(selected_symbols=selected)
+    return result
 
 
 @app.get("/api/schedules/status")

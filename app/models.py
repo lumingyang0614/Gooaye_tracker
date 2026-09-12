@@ -115,6 +115,15 @@ class CompanyInsight(Base):
     )
 
 
+class CompanyNarrativeState(Base):
+    """Track current evidence and the last successfully synthesized version."""
+    __tablename__ = "company_narrative_state"
+
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(Text, default="")
+    completed_fingerprint: Mapped[str] = mapped_column(Text, default="")
+
+
 class TaiwanSecurity(Base):
     """TWSE (上市) + TPEx (上櫃) security master, synced from the exchanges'
     own OpenAPI endpoints by app/services/taiwan_securities.py.

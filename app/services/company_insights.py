@@ -18,11 +18,13 @@ Two stages, deliberately split by what each is good at:
 
 Stage 2 never overwrites stage 1's stance/confidence: it only sees the top
 handful of segments, while the vote sees all of them. A failed or skipped LLM
-call therefore degrades to the old mechanical thesis rather than a blank card,
-and the rows stay usable.
+call preserves the last successful narrative, or a local mechanical preview
+for a new company. Only a narrative synthesized from the current evidence is
+eligible for import into X Stock Tracker.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections import Counter, defaultdict
@@ -36,7 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from app.db import SessionLocal
-from app.models import CompanyInsight, EpisodeSegment
+from app.models import CompanyInsight, CompanyNarrativeState, EpisodeSegment
 from app.runtime_config import load_runtime_config
 from app.services.entity_resolver import canonicalize_symbol_map, resolve_market
 from app.services.llm import analyze_companies, paced
@@ -180,32 +182,42 @@ async def rebuild_company_insights(
         else:
             symbols = _partial_rebuild_symbols(selected_symbols, existing_symbols)
 
-        live_symbols: list[str] = []
+        pending_symbols: list[str] = []
         for symbol in symbols:
             segments_for_symbol = grouped.get(symbol, [])
             row = session.scalar(select(CompanyInsight).where(CompanyInsight.symbol == symbol))
+            state = session.get(CompanyNarrativeState, symbol)
             if not segments_for_symbol:
                 # This symbol is no longer mentioned anywhere (e.g. it was
                 # dropped on re-analysis) — its old insight is now stale.
                 if row is not None:
                     session.delete(row)
                     removed += 1
+                if state is not None:
+                    session.delete(state)
                 continue
             if row is None:
                 row = CompanyInsight(symbol=symbol)
                 session.add(row)
-            _apply_insight(row, symbol, segments_for_symbol, names)
-            live_symbols.append(symbol)
+            if state is None:
+                state = CompanyNarrativeState(symbol=symbol, completed_fingerprint="")
+                session.add(state)
+            state.fingerprint = _narrative_fingerprint(symbol, segments_for_symbol, names, config)
+            _apply_insight(row, symbol, segments_for_symbol, names,
+                           preserve_narrative=bool(state.completed_fingerprint))
+            if state.completed_fingerprint != state.fingerprint:
+                pending_symbols.append(symbol)
             updated += 1
         # Commit the mechanical baseline before spending anything on the LLM,
         # so a model failure mid-run still leaves every row readable.
         session.commit()
 
     llm_result = {"attempted": 0, "completed": 0, "failures": []}
-    if use_llm and live_symbols:
-        llm_result = await _write_company_narratives(live_symbols, grouped, config)
+    if use_llm and pending_symbols:
+        llm_result = await _write_company_narratives(pending_symbols, grouped, config)
 
     return {
+        "symbols": symbols,
         "symbols_considered": len(symbols),
         "symbols_updated": updated,
         "symbols_removed": removed,
@@ -215,8 +227,24 @@ async def rebuild_company_insights(
     }
 
 
-def _apply_insight(row: CompanyInsight, symbol: str, segments: list[EpisodeSegment], names: dict[str, str]) -> None:
+def _narrative_fingerprint(symbol: str, segments: list[EpisodeSegment],
+                           names: dict[str, str], config: dict[str, Any]) -> str:
+    evidence = sorted((
+        s.episode.episode_number, s.chunk_index, s.summary or "", s.reason or "",
+        s.sentiment, s.importance, s.episode.source_url or "",
+    ) for s in segments)
+    payload = [1, symbol, names.get(symbol, symbol), evidence,
+               config.get("company_analysis_segment_limit", 8),
+               config.get("company_analysis_segment_characters", 600)]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _apply_insight(row: CompanyInsight, symbol: str, segments: list[EpisodeSegment], names: dict[str, str],
+                   *, preserve_narrative: bool = False) -> None:
     """Mechanical stage: everything derivable from the segments themselves."""
+    fields = ("company_name", "market", "mention_count", "stance", "confidence", "thesis",
+              "strengths_json", "weaknesses_json", "evidence_urls_json")
+    previous = tuple(getattr(row, field) for field in fields)
     stances = Counter(segment.sentiment for segment in segments)
     winners = [key for key in ("bullish", "bearish", "neutral") if stances[key] == max(stances.values())]
     stance = winners[0] if len(winners) == 1 else "neutral"
@@ -234,16 +262,18 @@ def _apply_insight(row: CompanyInsight, symbol: str, segments: list[EpisodeSegme
     # which overstates a passing remark far worse than importance does.
     row.confidence = sum(segment.importance for segment in segments) / len(segments)
     # Fallback prose, replaced by _write_company_narratives when the LLM runs.
-    row.thesis = "\n\n".join(
-        f"EP{segment.episode.episode_number}｜{segment.summary}"[:400] for segment in top if segment.summary
-    )
-    row.strengths_json = json.dumps([], ensure_ascii=False)
-    row.weaknesses_json = json.dumps([], ensure_ascii=False)
+    if not preserve_narrative:
+        row.thesis = "\n\n".join(
+            f"EP{segment.episode.episode_number}｜{segment.summary}"[:400] for segment in top if segment.summary
+        )
+        row.strengths_json = json.dumps([], ensure_ascii=False)
+        row.weaknesses_json = json.dumps([], ensure_ascii=False)
     row.evidence_urls_json = json.dumps(
         list(dict.fromkeys(segment.episode.source_url for segment in top if segment.episode.source_url)),
         ensure_ascii=False,
     )
-    row.updated_at = datetime.now(timezone.utc)
+    if previous != tuple(getattr(row, field) for field in fields):
+        row.updated_at = datetime.now(timezone.utc)
 
 
 def _top_segments(segments: list[EpisodeSegment], limit: int) -> list[EpisodeSegment]:
@@ -306,6 +336,7 @@ async def _write_company_narratives(
     starts = range(0, len(symbols), batch_size)
     async for start in paced(starts, pause_seconds):
         batch = symbols[start:start + batch_size]
+        logger.info("公司論點整合 %d/%d：%s", start + 1, len(symbols), ", ".join(batch))
         blocks = {
             symbol: f"COMPANY: {names.get(symbol, symbol)}\n"
                     + _evidence_block(grouped[symbol], segment_limit, characters)
@@ -315,6 +346,8 @@ async def _write_company_narratives(
         if not blocks:
             continue
         attempted += len(blocks)
+        fingerprints = {symbol: _narrative_fingerprint(symbol, grouped[symbol], names, config)
+                        for symbol in blocks}
         try:
             results = await analyze_companies(blocks, max_tokens=max_tokens)
         except Exception as exc:
@@ -339,18 +372,29 @@ async def _write_company_narratives(
             failures.append({"symbols": missing, "error": "MissingCompanyResults"})
         with SessionLocal() as session:
             for symbol, item in results.items():
+                if symbol not in blocks:
+                    continue
                 row = session.scalar(select(CompanyInsight).where(CompanyInsight.symbol == symbol))
                 if row is None:
+                    continue
+                state = session.get(CompanyNarrativeState, symbol)
+                if state is None or state.fingerprint != fingerprints[symbol]:
+                    continue
+                if not item["thesis"] and state.completed_fingerprint:
                     continue
                 # An empty thesis is worse than the mechanical fallback that is
                 # already stored, so only overwrite when the model said something.
                 if item["thesis"]:
                     row.thesis = item["thesis"][:1200]
+                    state.completed_fingerprint = fingerprints[symbol]
                 row.strengths_json = json.dumps(item["strengths"], ensure_ascii=False)
                 row.weaknesses_json = json.dumps(item["weaknesses"], ensure_ascii=False)
                 row.updated_at = datetime.now(timezone.utc)
-                completed += 1
+                if item["thesis"]:
+                    completed += 1
             session.commit()
+
+        logger.info("公司論點整合進度：完成 %d，已嘗試 %d/%d", completed, attempted, len(symbols))
 
     if attempted and completed < attempted:
         logger.warning("部分公司未取得模型論點，維持逐段彙整結果 | attempted=%s | completed=%s", attempted, completed)

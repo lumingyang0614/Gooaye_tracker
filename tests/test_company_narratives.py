@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app import db
-from app.models import CompanyInsight, Episode, EpisodeSegment
+from app.models import CompanyInsight, CompanyNarrativeState, Episode, EpisodeSegment
 from app.services import company_insights as insights
 
 
@@ -142,3 +142,54 @@ def test_market_is_stored_and_returned(database, monkeypatch):
     asyncio.run(insights.rebuild_company_insights())
     assert _row(database).market == "TW"
     assert insights.list_company_insights()[0]["market"] == "TW"
+
+
+def test_synthesis_survives_master_rebuild_and_unchanged_retry(database, monkeypatch):
+    _seed(database)
+    stub = AsyncMock(return_value={"2330.TW": {
+        "thesis": "Integrated company outlook", "strengths": ["capacity"], "weaknesses": ["cost"],
+    }})
+    monkeypatch.setattr(insights, "analyze_companies", stub)
+    asyncio.run(insights.rebuild_company_insights(use_llm=True))
+    before = _row(database)
+    asyncio.run(insights.rebuild_company_insights(use_llm=False))
+    result = asyncio.run(insights.rebuild_company_insights(use_llm=True))
+    after = _row(database)
+    assert (after.thesis, after.strengths_json, after.weaknesses_json, after.updated_at) == (
+        before.thesis, before.strengths_json, before.weaknesses_json, before.updated_at)
+    assert result["narratives_attempted"] == 0
+    assert stub.await_count == 1
+
+
+def test_changed_evidence_is_not_imported_until_synthesis_succeeds(database, monkeypatch):
+    from app.services import xstock_push
+    monkeypatch.setattr(xstock_push, "SessionLocal", database)
+    _seed(database)
+    stub = AsyncMock(return_value={"2330.TW": {
+        "thesis": "Integrated company outlook", "strengths": [], "weaknesses": [],
+    }})
+    monkeypatch.setattr(insights, "analyze_companies", stub)
+    asyncio.run(insights.rebuild_company_insights(use_llm=True))
+    assert xstock_push._rows_to_push(None)[0]["_ready"] is True
+    with database() as session:
+        session.scalars(select(EpisodeSegment)).first().summary = "New risk appeared"
+        session.commit()
+    stub.side_effect = RuntimeError("offline")
+    asyncio.run(insights.rebuild_company_insights(use_llm=True))
+    assert _row(database).thesis == "Integrated company outlook"
+    assert xstock_push._rows_to_push(None)[0]["_ready"] is False
+    stub.side_effect = None
+    result = asyncio.run(insights.rebuild_company_insights(use_llm=True))
+    assert result["narratives_completed"] == 1
+    assert xstock_push._rows_to_push(None)[0]["_ready"] is True
+
+
+def test_empty_thesis_is_not_marked_as_integrated(database, monkeypatch):
+    _seed(database)
+    monkeypatch.setattr(insights, "analyze_companies", AsyncMock(return_value={"2330.TW": {
+        "thesis": "", "strengths": [], "weaknesses": [],
+    }}))
+    result = asyncio.run(insights.rebuild_company_insights(use_llm=True))
+    assert result["narratives_completed"] == 0
+    with database() as session:
+        assert session.get(CompanyNarrativeState, "2330.TW").completed_fingerprint == ""

@@ -6,6 +6,10 @@ from 股癌 逐字稿. They answer the same question about the same companies fr
 different evidence, so this writes Gooaye's rows into that project's table
 where its dashboard already reads them.
 
+Only companies with a completed company_narrative_state for their current
+evidence are imported. Pending companies keep the previous target row, and
+their symbols are reported so the caller can retry synthesis.
+
 The two trackers' rows sit side by side rather than merged: x_company_views
 carries a `source` column ('x' / 'gooaye') and a UNIQUE (source, symbol) key,
 so 2330.TW appears once per source with each tracker's own stance, thesis and
@@ -36,7 +40,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import SessionLocal
-from app.models import CompanyInsight
+from app.models import CompanyInsight, CompanyNarrativeState
 from app.runtime_config import load_runtime_config
 from app.services.securities import xstocktracker_engine
 
@@ -122,6 +126,7 @@ def _rows_to_push(selected_symbols: list[str] | None) -> list[dict[str, Any]]:
         if selected_symbols is not None:
             query = query.where(CompanyInsight.symbol.in_(selected_symbols))
         insights = list(session.scalars(query))
+        states = {s.symbol: s for s in session.scalars(select(CompanyNarrativeState))}
     now = datetime.now(timezone.utc)
     rows = []
     for insight in insights:
@@ -130,6 +135,9 @@ def _rows_to_push(selected_symbols: list[str] | None) -> list[dict[str, Any]]:
             logger.warning("略過無法寫入 xstocktracker 的 symbol | symbol=%r", insight.symbol)
             continue
         rows.append({
+            "_ready": bool(states.get(symbol)
+                           and states[symbol].completed_fingerprint
+                           and states[symbol].completed_fingerprint == states[symbol].fingerprint),
             "source": SOURCE_GOOAYE,
             "symbol": symbol,
             "company_name": (insight.company_name or symbol)[:_COMPANY_NAME_MAX],
@@ -190,7 +198,11 @@ def push_company_insights(selected_symbols: list[str] | None = None) -> dict[str
         return _skip("no affected symbols")
 
     rows = _rows_to_push(requested)
+    # Pending companies are still live: never delete a previously imported
+    # good row just because its replacement has not finished synthesis.
     live_symbols = [row["symbol"] for row in rows]
+    pending = [row["symbol"] for row in rows if not row.get("_ready", True)]
+    rows = [row for row in rows if row.pop("_ready", True)]
 
     try:
         with engine.begin() as connection:
@@ -233,5 +245,6 @@ def push_company_insights(selected_symbols: list[str] | None = None) -> dict[str
         "pushed": len(rows),
         "removed": int(removed or 0),
         "mode": "incremental" if requested is not None else "all",
-        "symbols": live_symbols,
+        "symbols": [row["symbol"] for row in rows],
+        "pending_narratives": pending,
     }

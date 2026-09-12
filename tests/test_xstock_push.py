@@ -200,6 +200,20 @@ def test_preflight_failure_writes_nothing(wired):
 
 # --- what actually gets written ---------------------------------------------
 
+
+def test_pending_synthesis_neither_imports_nor_deletes_previous_good_row(wired, monkeypatch):
+    connection = wired()
+    rows = _build([_insight()], None)
+    rows[0]["_ready"] = False
+    monkeypatch.setattr(xstock_push, "_rows_to_push", lambda selected: rows)
+    result = push_company_insights()
+    assert result["pushed"] == 0
+    assert result["pending_narratives"] == ["2330.TW"]
+    assert result["symbols"] == []
+    assert not any(sql.startswith("INSERT") for sql, _ in connection.calls)
+    deletion = next(params for sql, params in connection.calls if sql.startswith("DELETE"))
+    assert deletion["live"] == ["2330.TW"]
+
 def test_full_push_writes_rows_under_the_gooaye_source(wired):
     connection = wired()
     result = push_company_insights()

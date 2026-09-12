@@ -108,12 +108,14 @@ python -m scripts.backfill_transcripts
 python -m scripts.rebuild_company_insights
 ```
 
-這會依 `analysis.company_analysis_batch_size` 分批呼叫 LLM，替每家公司寫出核心論點與優劣勢。只想更新機械彙整（立場、重要度、市場分類、提及次數、原文連結）而完全不呼叫模型時：
+這會依 `analysis.company_analysis_batch_size` 分批呼叫 LLM，將同一家公司的跨集內容整合成核心論點與優劣勢。`company_narrative_state` 記錄依據版本與成功整合的版本，未變動且已整合的公司會跳過，失敗或缺少論點的公司會重試。只想更新機械彙整（立場、重要度、市場分類、提及次數、原文連結）而完全不呼叫模型時：
 
 ```powershell
 python -m scripts.rebuild_company_insights --no-llm
 python -m scripts.rebuild_company_insights --symbols 2330.TW NVDA
 ```
+
+`--no-llm` 和每日證券主檔重建會保留已完成的論點與優劣勢。依據有變動但尚未重新整合時，推送會暫緩該公司，保留目標端上一份資料；新公司的逐段摘要也不會直接匯入。沒有新集數的背景排程會重試尚未完成的整合，再補推送。
 
 ### 遇到 429 Too Many Requests
 
@@ -240,6 +242,8 @@ POST /api/xstocktracker/push?symbols=2330.TW  # 只推特定幾家
 ```
 
 ### 給下游讀取端的融合觀點
+
+`scripts.push_to_xstocktracker` 與 `POST /api/xstocktracker/push` 會依序完成「股癌跨集公司論點整合 → 匯入 `source='gooaye'` → 更新與 X 的融合觀點」。首次更新時會由 `init_db()` 新建本地 `company_narrative_state` 表，舊資料需重新整合一次；後續只重做依據有變動或先前失敗的公司。回傳 `pending_narratives` 表示仍未完成、沒有匯入的公司。
 
 `x_company_views` 刻意一個來源一列，所以**同一家公司會有兩列**（`source='x'` 與 `source='gooaye'`）。儀表板沒問題——卡片上有來源標籤；但「用公司名查詢、把每一筆都顯示出來」的下游就會看到重複，例如 LINE bot 的 `/觀點 MU` 會回兩張卡。
 
