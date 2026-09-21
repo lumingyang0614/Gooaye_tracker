@@ -369,6 +369,14 @@ async def chat_json(messages: list[dict[str, str]], schema: dict[str, Any], *, m
     settings = get_settings()
     request_timeout = timeout or settings.llm_timeout_seconds
     provider = settings.llm_provider.strip().lower()
+    if provider == "openrouter":
+        if not settings.openrouter_api_key or not settings.openrouter_model:
+            raise RuntimeError("OpenRouter requires OPENROUTER_API_KEY and OPENROUTER_MODEL")
+        return await _chat_openai_compatible(
+            api_url=settings.openrouter_base_url, api_key=settings.openrouter_api_key,
+            model=settings.openrouter_model, messages=messages, schema=schema,
+            max_tokens=max_tokens, timeout=request_timeout, use_json_schema=True,
+        )
     if provider == "bai":
         return await _chat_bai(messages, schema, max_tokens, request_timeout)
     if provider == "api":
@@ -603,6 +611,8 @@ async def synthesize_merged_views(blocks: dict[str, str], *, max_tokens: int = 8
 async def llm_health() -> bool:
     settings = get_settings()
     provider = settings.llm_provider.strip().lower()
+    if provider == "openrouter":
+        return bool(settings.openrouter_api_key and settings.openrouter_model)
     if provider == "bai":
         return bool(settings.bai_api_key and settings.bai_api_model)
     if provider == "api":

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     xstocktracker_db_url: str = ""
 
     llm_provider: str = "ollama"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openrouter/free"
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:30b"
     llm_api_url: str = "https://api.openai.com/v1"
