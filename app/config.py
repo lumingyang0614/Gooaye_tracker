@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # glm-5.3-flash always reasons; "low" keeps it from spending the whole
     # max_tokens budget on reasoning_content instead of the actual JSON reply.
     bai_reasoning_effort: str = "low"
+    # LLM_PROVIDER=claude_code / codex：呼叫本機已登入的 CLI，路徑留空會自動尋找。
+    claude_code_cli_path: str = ""
+    claude_code_model: str = "sonnet"
+    codex_cli_path: str = ""
+    codex_model: str = ""
+    codex_reasoning_effort: str = "low"
     llm_timeout_seconds: float = 300
 
     whisper_model: str = "small"

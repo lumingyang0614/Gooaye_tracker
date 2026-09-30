@@ -20,6 +20,7 @@ import httpx
 
 from app.config import get_settings
 from app.runtime_config import load_runtime_config
+from app.services.cli_llm import chat_json_claude_code, chat_json_codex, cli_logged_in, resolve_cli
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -365,6 +366,28 @@ async def _chat_bai(messages: list[dict[str, str]], schema: dict[str, Any], max_
     )
 
 
+async def _chat_cli(messages: list[dict[str, str]], schema: dict[str, Any], timeout: float) -> dict[str, Any]:
+    settings = get_settings()
+    provider = settings.llm_provider.strip().lower()
+    if provider == "claude_code":
+        binary = resolve_cli("claude", settings.claude_code_cli_path)
+        if not binary:
+            raise RuntimeError("LLM_PROVIDER=claude_code requires Claude Code CLI (set CLAUDE_CODE_CLI_PATH)")
+        result = await chat_json_claude_code(
+            binary=binary, model=settings.claude_code_model, messages=messages, schema=schema, timeout=timeout,
+        )
+    else:
+        binary = resolve_cli("codex", settings.codex_cli_path)
+        if not binary:
+            raise RuntimeError("LLM_PROVIDER=codex requires Codex CLI (set CODEX_CLI_PATH)")
+        result = await chat_json_codex(
+            binary=binary, model=settings.codex_model, reasoning_effort=settings.codex_reasoning_effort,
+            messages=messages, schema=schema, timeout=timeout,
+        )
+    _validate_schema(result, schema)
+    return result
+
+
 async def chat_json(messages: list[dict[str, str]], schema: dict[str, Any], *, max_tokens: int = 4096, timeout: float | None = None) -> dict[str, Any]:
     settings = get_settings()
     request_timeout = timeout or settings.llm_timeout_seconds
@@ -377,6 +400,8 @@ async def chat_json(messages: list[dict[str, str]], schema: dict[str, Any], *, m
             model=settings.openrouter_model, messages=messages, schema=schema,
             max_tokens=max_tokens, timeout=request_timeout, use_json_schema=True,
         )
+    if provider in {"claude_code", "codex"}:
+        return await _chat_cli(messages, schema, request_timeout)
     if provider == "bai":
         return await _chat_bai(messages, schema, max_tokens, request_timeout)
     if provider == "api":
@@ -613,6 +638,10 @@ async def llm_health() -> bool:
     provider = settings.llm_provider.strip().lower()
     if provider == "openrouter":
         return bool(settings.openrouter_api_key and settings.openrouter_model)
+    if provider in {"claude_code", "codex"}:
+        name = "claude" if provider == "claude_code" else "codex"
+        binary = resolve_cli(name, settings.claude_code_cli_path if name == "claude" else settings.codex_cli_path)
+        return bool(binary) and await cli_logged_in(name, binary)
     if provider == "bai":
         return bool(settings.bai_api_key and settings.bai_api_model)
     if provider == "api":

@@ -81,6 +81,18 @@ Copy-Item .env.example .env
   若電腦資源有限，可在 `.env` 換成較小的模型，但公司抽取品質可能下降。
 - `LLM_PROVIDER=bai` 時，用 `BAI_API_URL`／`BAI_API_KEY`／`BAI_API_MODEL` 呼叫雲端服務；若已經在跑 Serenity Stock Tracker，可以沿用同一組 BAI 金鑰（兩個專案各自獨立呼叫，不共用程式或資料庫，只是共用同一組帳號額度）。BAI／GLM 系列模型對嚴格 JSON schema 的支援不穩定，此路徑改用「先照 prompt 要求輸出 JSON、格式不對就重試一次」的方式，而不強制 `response_format`。
 - 若改用 `LLM_PROVIDER=api`，需另外填 `LLM_API_URL`／`LLM_API_KEY`／`LLM_API_MODEL`（任何其他相容 OpenAI Chat Completions 格式的服務，會強制要求 JSON schema）。
+- `LLM_PROVIDER=claude_code` 或 `codex` 時，改呼叫本機已登入的 Claude Code／Codex CLI（沿用訂閱帳號，不需 API 金鑰）：
+  ```dotenv
+  # Claude Code：以 `claude -p --json-schema` headless 執行，停用所有工具
+  LLM_PROVIDER=claude_code
+  CLAUDE_CODE_MODEL=sonnet   # 可用 haiku / sonnet / opus 或完整模型 ID
+
+  # 或 Codex：以 `codex exec --output-schema` 在唯讀 sandbox 執行
+  LLM_PROVIDER=codex
+  CODEX_MODEL=               # 留空使用 ~/.codex/config.toml 的預設模型
+  CODEX_REASONING_EFFORT=low # minimal / low / medium / high
+  ```
+  程式會先在 PATH 找 `claude` / `codex`，找不到時自動使用 VS Code 擴充套件內附的執行檔；也可用 `CLAUDE_CODE_CLI_PATH`、`CODEX_CLI_PATH` 指定完整路徑。使用前需先在終端機登入一次（`claude` 或 `codex login`）。CLI 每次呼叫都會啟動新程序，速度比 HTTP API 慢，大量回補時建議調高 `LLM_TIMEOUT_SECONDS`；用量計入該訂閱方案的額度。
 
 非機密設定（來源網址、Whisper 開關、台股別名清單、公司論點分析開關）在 `config/settings.yaml`，可直接編輯，不需要改程式碼。
 
